@@ -23,7 +23,7 @@ import { getHighlanderProviders } from '../../git/utils/remote.utils.js';
 import { getContext } from '../../system/-webview/context.js';
 import { fromNow } from '../../system/date.js';
 import { gate } from '../../system/decorators/gate.js';
-import { debug, log } from '../../system/decorators/log.js';
+import { debug, trace } from '../../system/decorators/log.js';
 import { memoize } from '../../system/decorators/memoize.js';
 import { weakEvent } from '../../system/event.js';
 import { disposableInterval } from '../../system/function.js';
@@ -370,7 +370,7 @@ export class BranchNode
 
 				if (log.hasMore) {
 					children.push(
-						new LoadMoreNode(this.view, this, children[children.length - 1], {
+						new LoadMoreNode(this.view, this, children.at(-1)!, {
 							getCount: () =>
 								this.view.container.git
 									.getRepositoryService(branch.repoPath)
@@ -420,13 +420,13 @@ export class BranchNode
 		return item;
 	}
 
-	@log()
+	@debug()
 	async star(): Promise<void> {
 		await this.branch.star();
 		void this.view.refresh(true);
 	}
 
-	@log()
+	@debug()
 	async unstar(): Promise<void> {
 		await this.branch.unstar();
 		void this.view.refresh(true);
@@ -779,7 +779,7 @@ export class CommitsCurrentBranchNode extends SubscribeableViewNode<'commits-cur
 		return this.branch.upstream?.missing || this.branch.detached ? undefined : this.repo?.getLastFetched();
 	}
 
-	@debug()
+	@trace()
 	protected async subscribe(): Promise<Disposable | undefined> {
 		const lastFetched = (await this.getLastFetched()) ?? 0;
 
@@ -805,7 +805,7 @@ export class CommitsCurrentBranchNode extends SubscribeableViewNode<'commits-cur
 		return undefined;
 	}
 
-	@debug<CommitsCurrentBranchNode['onRepositoryChanged']>({ args: { 0: e => e.toString() } })
+	@trace()
 	private onRepositoryChanged(_e: RepositoryChangeEvent) {
 		this.view.triggerNodeChange(this);
 	}

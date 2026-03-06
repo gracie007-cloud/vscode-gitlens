@@ -10,9 +10,8 @@ import { parseShortlog } from '../../../../git/parsers/shortlogParser.js';
 import { calculateContributionScore } from '../../../../git/utils/contributor.utils.js';
 import { isUncommittedStaged } from '../../../../git/utils/revision.utils.js';
 import { isUserMatch } from '../../../../git/utils/user.utils.js';
-import { log } from '../../../../system/decorators/log.js';
-import { Logger } from '../../../../system/logger.js';
-import { getLogScope } from '../../../../system/logger.scope.js';
+import { debug } from '../../../../system/decorators/log.js';
+import { getScopedLogger } from '../../../../system/logger.scope.js';
 import type { CacheController } from '../../../../system/promiseCache.js';
 import { createDisposable } from '../../../../system/unifiedDisposable.js';
 import type { Git } from '../git.js';
@@ -27,7 +26,7 @@ export class ContributorsGitSubProvider implements GitContributorsSubProvider {
 		private readonly provider: LocalGitProviderInternal,
 	) {}
 
-	@log()
+	@debug()
 	async getContributors(
 		repoPath: string,
 		rev?: string | undefined,
@@ -43,7 +42,7 @@ export class ContributorsGitSubProvider implements GitContributorsSubProvider {
 	): Promise<GitContributorsResult> {
 		if (repoPath == null) return { contributors: [] };
 
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		const getCore = async (commonPath: string, cacheable?: CacheController): Promise<GitContributorsResult> => {
 			const contributors = new Map<string, GitContributor>();
@@ -174,7 +173,7 @@ export class ContributorsGitSubProvider implements GitContributorsSubProvider {
 				};
 			} catch (ex) {
 				cacheable?.invalidate();
-				Logger.error(ex, scope);
+				scope?.error(ex);
 				debugger;
 
 				if (!isCancellationError(ex)) return { contributors: [] };
@@ -215,7 +214,7 @@ export class ContributorsGitSubProvider implements GitContributorsSubProvider {
 		);
 	}
 
-	@log()
+	@debug()
 	async getContributorsLite(
 		repoPath: string,
 		rev?: string | undefined,
@@ -224,7 +223,7 @@ export class ContributorsGitSubProvider implements GitContributorsSubProvider {
 	): Promise<GitContributor[]> {
 		if (repoPath == null) return [];
 
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		if (!rev || isUncommittedStaged(rev)) {
 			rev = undefined;
@@ -260,7 +259,7 @@ export class ContributorsGitSubProvider implements GitContributorsSubProvider {
 				return shortlog.contributors;
 			} catch (ex) {
 				cacheable?.invalidate();
-				Logger.error(ex, scope);
+				scope?.error(ex);
 				debugger;
 
 				return [];
@@ -286,7 +285,7 @@ export class ContributorsGitSubProvider implements GitContributorsSubProvider {
 		);
 	}
 
-	@log()
+	@debug()
 	async getContributorsStats(
 		repoPath: string,
 		options?: { merges?: boolean | 'first-parent'; since?: string },
@@ -295,7 +294,7 @@ export class ContributorsGitSubProvider implements GitContributorsSubProvider {
 	): Promise<GitContributorsStats | undefined> {
 		if (repoPath == null) return undefined;
 
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		const getCore = async (commonPath: string): Promise<GitContributorsStats | undefined> => {
 			try {
@@ -326,7 +325,7 @@ export class ContributorsGitSubProvider implements GitContributorsSubProvider {
 
 				return { count: contributions.length, contributions: contributions } satisfies GitContributorsStats;
 			} catch (ex) {
-				Logger.error(ex, scope);
+				scope?.error(ex);
 				debugger;
 
 				return undefined;

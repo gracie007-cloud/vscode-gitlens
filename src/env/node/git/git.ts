@@ -1,12 +1,10 @@
 import type { SpawnOptions } from 'child_process';
 import { spawn } from 'child_process';
-import { accessSync } from 'fs';
 import { join as joinPath } from 'path';
 import * as process from 'process';
-import type { CancellationToken, Disposable, OutputChannel } from 'vscode';
+import type { CancellationToken, Disposable, LogOutputChannel } from 'vscode';
 import { Uri, window, workspace } from 'vscode';
 import { hrtime } from '@env/hrtime.js';
-import { GlyphChars } from '../../../constants.js';
 import type { Container } from '../../../container.js';
 import { CancellationError, isCancellationError } from '../../../errors.js';
 import type { FilteredGitFeatures, GitFeatureOrPrefix, GitFeatures } from '../../../features.js';
@@ -56,7 +54,7 @@ import { splitPath } from '../../../system/-webview/path.js';
 import { getScopedCounter } from '../../../system/counter.js';
 import { slowCallWarningThreshold } from '../../../system/logger.constants.js';
 import { Logger } from '../../../system/logger.js';
-import { getLoggableScopeBlockOverride } from '../../../system/logger.scope.js';
+import { formatLoggableScopeBlock } from '../../../system/logger.scope.js';
 import { dirname, isAbsolute, joinPaths, normalizePath } from '../../../system/path.js';
 import { defer, isPromise } from '../../../system/promise.js';
 import { getDurationMilliseconds } from '../../../system/string.js';
@@ -122,6 +120,8 @@ export const GitErrors = {
 	permissionDenied: /Permission.*denied/i,
 	pushRejected: /^error:\s*failed to push some refs to\b/m,
 	pushRejectedRefDoesNotExists: /error:\s*unable to delete '(.*?)': remote ref does not exist/m,
+	pushRejectedRemoteRefUpdated: /! \[rejected\].*\(remote ref updated since checkout\)/m,
+	pushRejectedStaleInfo: /! \[rejected\].*\(stale info\)/m,
 	rebaseAborted: /Nothing to do|rebase.*aborted/i,
 	rebaseInProgress: /It seems that there is already a rebase-(?:merge|apply) directory/i,
 	rebaseMissingTodo: /error:\s*could not read file .*\/git-rebase-todo': No such file or directory/,
@@ -142,6 +142,8 @@ export const GitErrors = {
 	unmergedChanges: /error:\s*you need to resolve your current index first/i,
 	unmergedFiles: /is not possible because you have unmerged files|You have unmerged files/i,
 	unresolvedConflicts: /You must edit all merge conflicts|Resolve all conflicts/i,
+	unsafeRepository:
+		/(?:^fatal:\s*detected dubious ownership in repository at '([^']+)'|unsafe repository \('([^']+)' is owned by someone else\))[\s\S]*(git config --global --add safe\.directory [^\n•]+)/m,
 	unstagedChanges: /You have unstaged changes/i,
 };
 
@@ -164,6 +166,11 @@ export const GitWarnings = {
 	tipBehind: /tip of your current branch is behind/i,
 };
 
+const fatalPrefixRegex = /fatal:\s*/g;
+const newlineOrReturnRegex = /\r?\n|\r/g;
+const ignoreRevsFileArgRegex = /^--ignore-revs-file\s*=?\s*(.*)$/;
+const trailingNewlineRegex = /[\r|\n]+$/;
+
 function defaultExceptionHandler(ex: Error, cwd: string | undefined, start?: [number, number]): void {
 	if (isCancellationError(ex)) throw ex;
 
@@ -175,8 +182,8 @@ function defaultExceptionHandler(ex: Error, cwd: string | undefined, start?: [nu
 				Logger.warn(
 					`[${cwd}] Git ${msg
 						.trim()
-						.replace(/fatal:\s*/g, '')
-						.replace(/\r?\n|\r/g, ` ${GlyphChars.Dot} `)}${duration}`,
+						.replace(fatalPrefixRegex, '')
+						.replace(newlineOrReturnRegex, ` \u2022 `)}${duration}`,
 				);
 				return;
 			}
@@ -337,13 +344,7 @@ export class Git implements Disposable {
 
 			// Fixes https://github.com/gitkraken/vscode-gitlens/issues/73 & https://github.com/gitkraken/vscode-gitlens/issues/161
 			// See https://stackoverflow.com/questions/4144417/how-to-handle-asian-characters-in-file-names-in-git-on-os-x
-			args.unshift(
-				'-c',
-				'core.quotepath=false',
-				'-c',
-				'color.ui=false',
-				...(configs != null ? configs : emptyArray),
-			);
+			args.unshift('-c', 'core.quotepath=false', '-c', 'color.ui=false', ...(configs ?? emptyArray));
 
 			if (process.platform === 'win32') {
 				args.unshift('-c', 'core.longpaths=true');
@@ -375,7 +376,9 @@ export class Git implements Disposable {
 				.catch(() => {});
 		} else {
 			waiting = true;
-			Logger.debug(`${getLoggableScopeBlockOverride('GIT')} ${gitCommand} ${GlyphChars.Dot} waiting...`);
+			Logger.trace(
+				`${formatLoggableScopeBlock('GIT')} ${gitCommand} \u2022 awaiting existing call in progress...`,
+			);
 		}
 
 		let exception: Error | undefined;
@@ -398,7 +401,7 @@ export class Git implements Disposable {
 							? 'cancellation'
 							: 'unknown';
 				Logger.warn(
-					`${getLoggableScopeBlockOverride('GIT')} ${gitCommand} ${GlyphChars.Dot} ABORTED after ${duration}ms (${reason})`,
+					`${formatLoggableScopeBlock('GIT')} ${gitCommand} \u2022 ABORTED after ${duration}ms (${reason})`,
 				);
 				this.container.telemetry.sendEvent('op/git/aborted', {
 					operation: gitCommand,
@@ -617,9 +620,7 @@ export class Git implements Disposable {
 	private _gitLocationPromise: Promise<GitLocation> | undefined;
 	private async getLocation(): Promise<GitLocation> {
 		if (this._gitLocation == null) {
-			if (this._gitLocationPromise == null) {
-				this._gitLocationPromise = this._gitLocator();
-			}
+			this._gitLocationPromise ??= this._gitLocator();
 			this._gitLocation = await this._gitLocationPromise;
 		}
 		return this._gitLocation;
@@ -711,7 +712,7 @@ export class Git implements Disposable {
 				arg => arg !== '--ignore-revs-file' && arg.startsWith('--ignore-revs-file'),
 			);
 			if (argIndex !== -1) {
-				const match = /^--ignore-revs-file\s*=?\s*(.*)$/.exec(options.args[argIndex]);
+				const match = ignoreRevsFileArgRegex.exec(options.args[argIndex]);
 				if (match != null) {
 					options.args.splice(argIndex, 1, '--ignore-revs-file', match[1]);
 				}
@@ -1130,7 +1131,7 @@ export class Git implements Disposable {
 			);
 
 			if (options?.force?.withLease && error.details.reason === 'rejected') {
-				if (ex.stderr && /! \[rejected\].*\(stale info\)/m.test(ex.stderr)) {
+				if (ex.stderr && GitErrors.pushRejectedStaleInfo.test(ex.stderr)) {
 					throw new PushError(
 						{
 							reason: 'rejectedWithLease',
@@ -1141,11 +1142,7 @@ export class Git implements Disposable {
 						ex,
 					);
 				}
-				if (
-					options.force.ifIncludes &&
-					ex.stderr &&
-					/! \[rejected\].*\(remote ref updated since checkout\)/m.test(ex.stderr)
-				) {
+				if (options.force.ifIncludes && ex.stderr && GitErrors.pushRejectedRemoteRefUpdated.test(ex.stderr)) {
 					throw new PushError(
 						{
 							reason: 'rejectedWithLeaseIfIncludes',
@@ -1252,13 +1249,14 @@ export class Git implements Disposable {
 	 * Combined rev-parse call that returns repository info in a single spawn.
 	 * This is an optimization to reduce process spawns during repository discovery.
 	 *
-	 * @returns Object with repoPath (toplevel), gitDir path, and optional commonGitDir path for worktrees.
+	 * @returns Object with repoPath (toplevel), gitDir path, optional commonGitDir path for worktrees,
+	 *          and optional superprojectPath for submodules.
 	 *          Returns `[false]` for unsafe repositories, or `undefined`/empty array for non-repos.
 	 */
 	async rev_parse__repository_info(
 		cwd: string,
 	): Promise<
-		| { repoPath: string; gitDir: string; commonGitDir: string | undefined }
+		| { repoPath: string; gitDir: string; commonGitDir: string | undefined; superprojectPath: string | undefined }
 		| [safe: true, repoPath: string]
 		| [safe: false]
 		| []
@@ -1267,19 +1265,20 @@ export class Git implements Disposable {
 
 		if (!workspace.isTrusted) {
 			// Check if the folder is a bare clone: if it has a file named HEAD && `rev-parse --show-cdup` is empty
-			try {
-				accessSync(joinPaths(cwd, 'HEAD'));
-				result = await this.exec(
-					{ cwd: cwd, errors: 'throw', configs: ['-C', cwd] },
-					'rev-parse',
-					'--show-cdup',
-				);
-				if (!result.stdout.trim()) {
-					Logger.log(`Skipping (untrusted workspace); bare clone repository detected in '${cwd}'`);
-					return emptyArray as [];
+			if (await fsExists(joinPaths(cwd, 'HEAD'))) {
+				try {
+					result = await this.exec(
+						{ cwd: cwd, errors: 'throw', configs: ['-C', cwd] },
+						'rev-parse',
+						'--show-cdup',
+					);
+					if (!result.stdout.trim()) {
+						Logger.warn(`Skipping (untrusted workspace); bare clone repository detected in '${cwd}'`);
+						return emptyArray as [];
+					}
+				} catch {
+					// If this throw, we should be good to open the repo (e.g. HEAD doesn't exist)
 				}
-			} catch {
-				// If this throw, we should be good to open the repo (e.g. HEAD doesn't exist)
 			}
 		}
 
@@ -1290,18 +1289,20 @@ export class Git implements Disposable {
 				'--show-toplevel',
 				'--git-dir',
 				'--git-common-dir',
+				'--show-superproject-working-tree',
 			);
 			if (!result.stdout) return emptyArray as [];
 
-			// Output is 3 lines: show-toplevel, git-dir, git-common-dir
+			// Output is 3-4 lines: show-toplevel, git-dir, git-common-dir, [show-superproject-working-tree]
+			// The 4th line is only present for submodules
 			// Keep trailing spaces which are part of the directory name
 			const lines = result.stdout.split('\n').map(r => r.trimStart());
-			const [repoPath, dotGitPath, commonDotGitPath] = lines;
+			const [repoPath, dotGitPath, commonDotGitPath, superprojectPath] = lines;
 
 			if (!repoPath) return emptyArray as [];
 
 			// Normalize repo path: https://github.com/git-for-windows/git/issues/2478
-			const normalizedRepoPath = normalizePath(repoPath.replace(/[\r|\n]+$/, ''));
+			const normalizedRepoPath = normalizePath(repoPath.replace(trailingNewlineRegex, ''));
 
 			// Normalize git dir paths (may be relative)
 			let gitDir = dotGitPath;
@@ -1323,16 +1324,23 @@ export class Git implements Disposable {
 				}
 			}
 
-			return { repoPath: normalizedRepoPath, gitDir: gitDir, commonGitDir: commonGitDir };
+			// Normalize superproject path if present (4th line only exists for submodules)
+			const normalizedSuperprojectPath = superprojectPath
+				? normalizePath(superprojectPath.replace(trailingNewlineRegex, ''))
+				: undefined;
+
+			return {
+				repoPath: normalizedRepoPath,
+				gitDir: gitDir,
+				commonGitDir: commonGitDir,
+				superprojectPath: normalizedSuperprojectPath,
+			};
 		} catch (ex) {
 			if (ex instanceof WorkspaceUntrustedError) return emptyArray as [];
 
-			const unsafeMatch =
-				/(?:^fatal:\s*detected dubious ownership in repository at '([^']+)'|unsafe repository \('([^']+)' is owned by someone else\))[\s\S]*(git config --global --add safe\.directory [^\n•]+)/m.exec(
-					ex.stderr,
-				);
+			const unsafeMatch = GitErrors.unsafeRepository.exec(ex.stderr);
 			if (unsafeMatch != null) {
-				Logger.log(
+				Logger.warn(
 					`Skipping; unsafe repository detected in '${unsafeMatch[1] || unsafeMatch[2]}'; run '${
 						unsafeMatch[3]
 					}' to allow it`,
@@ -1340,7 +1348,7 @@ export class Git implements Disposable {
 				return [false];
 			}
 
-			const inDotGit = /this operation must be run in a work tree/.test(ex.stderr);
+			const inDotGit = GitWarnings.mustRunInWorkTree.test(ex.stderr);
 			// Check if we are in a bare clone
 			if (inDotGit && workspace.isTrusted) {
 				result = await this.exec({ cwd: cwd, errors: 'ignore' }, 'rev-parse', '--is-bare-repository');
@@ -1375,19 +1383,20 @@ export class Git implements Disposable {
 
 		if (!workspace.isTrusted) {
 			// Check if the folder is a bare clone: if it has a file named HEAD && `rev-parse --show-cdup` is empty
-			try {
-				accessSync(joinPaths(cwd, 'HEAD'));
-				result = await this.exec(
-					{ cwd: cwd, errors: 'throw', configs: ['-C', cwd] },
-					'rev-parse',
-					'--show-cdup',
-				);
-				if (!result.stdout.trim()) {
-					Logger.log(`Skipping (untrusted workspace); bare clone repository detected in '${cwd}'`);
-					return emptyArray as [];
+			if (await fsExists(joinPaths(cwd, 'HEAD'))) {
+				try {
+					result = await this.exec(
+						{ cwd: cwd, errors: 'throw', configs: ['-C', cwd] },
+						'rev-parse',
+						'--show-cdup',
+					);
+					if (!result.stdout.trim()) {
+						Logger.warn(`Skipping (untrusted workspace); bare clone repository detected in '${cwd}'`);
+						return emptyArray as [];
+					}
+				} catch {
+					// If this throw, we should be good to open the repo (e.g. HEAD doesn't exist)
 				}
-			} catch {
-				// If this throw, we should be good to open the repo (e.g. HEAD doesn't exist)
 			}
 		}
 
@@ -1397,16 +1406,13 @@ export class Git implements Disposable {
 			// Keep trailing spaces which are part of the directory name
 			return !result.stdout
 				? (emptyArray as [])
-				: [true, normalizePath(result.stdout.trimStart().replace(/[\r|\n]+$/, ''))];
+				: [true, normalizePath(result.stdout.trimStart().replace(trailingNewlineRegex, ''))];
 		} catch (ex) {
 			if (ex instanceof WorkspaceUntrustedError) return emptyArray as [];
 
-			const unsafeMatch =
-				/(?:^fatal:\s*detected dubious ownership in repository at '([^']+)'|unsafe repository \('([^']+)' is owned by someone else\))[\s\S]*(git config --global --add safe\.directory [^\n•]+)/m.exec(
-					ex.stderr,
-				);
+			const unsafeMatch = GitErrors.unsafeRepository.exec(ex.stderr);
 			if (unsafeMatch != null) {
-				Logger.log(
+				Logger.warn(
 					`Skipping; unsafe repository detected in '${unsafeMatch[1] || unsafeMatch[2]}'; run '${
 						unsafeMatch[3]
 					}' to allow it`,
@@ -1414,7 +1420,7 @@ export class Git implements Disposable {
 				return [false];
 			}
 
-			const inDotGit = /this operation must be run in a work tree/.test(ex.stderr);
+			const inDotGit = GitWarnings.mustRunInWorkTree.test(ex.stderr);
 			// Check if we are in a bare clone
 			if (inDotGit && workspace.isTrusted) {
 				result = await this.exec({ cwd: cwd, errors: 'ignore' }, 'rev-parse', '--is-bare-repository');
@@ -1524,7 +1530,18 @@ export class Git implements Disposable {
 			params.push('--include-untracked');
 		}
 
-		if (options?.keepIndex && !options?.includeUntracked) {
+		// "--keep-index --include-untracked -- <pathspec>" hits a bug in git in some circumstances.
+		// Don't allow these flags together.
+		//
+		// $ mkdir stash-test && cd stash-test && git init
+		// $ echo a > a.txt
+		// $ git add a.txt
+		// $ git commit -m init
+		// $ echo b > b.txt
+		// $ git stash push --keep-index --include-untracked -- b.txt
+		// Saved working directory and index state WIP on main: 8a280fe init
+		// error: pathspec ':(prefix:0)b.txt' did not match any file(s) known to git
+		if (options?.keepIndex && !(params.includes('--include-untracked') && options?.pathspecs?.length)) {
 			params.push('--keep-index');
 		}
 
@@ -1642,8 +1659,8 @@ export class Git implements Disposable {
 		}
 	}
 	private logGitCommandStart(command: string, id: number): void {
-		Logger.log(`${getLoggableScopeBlockOverride(`GIT:→${id}`)} ${command} ${GlyphChars.Dot} starting...`);
-		this.logCore(`${getLoggableScopeBlockOverride(`→${id}`, '')} ${command} ${GlyphChars.Dot} starting...`);
+		Logger.info(`${formatLoggableScopeBlock(`GIT →${id}`)} ${command} \u2022 starting...`);
+		this.logCore(`${formatLoggableScopeBlock(`→${id}`, '')} ${command} \u2022 starting...`);
 	}
 
 	private logGitCommandComplete(
@@ -1659,40 +1676,41 @@ export class Git implements Disposable {
 		if (ex != null) {
 			Logger.error(
 				undefined,
-				`${getLoggableScopeBlockOverride(id ? `GIT:←${id}` : 'GIT')} ${command} ${GlyphChars.Dot} ${
+				`${formatLoggableScopeBlock(id ? `GIT ←${id}` : 'GIT')} ${command} \u2022 ${
 					isCancellationError(ex)
 						? 'cancelled'
 						: (ex.message || String(ex) || '')
 								.trim()
-								.replace(/fatal:\s*/g, '')
-								.replace(/\r?\n|\r/g, ` ${GlyphChars.Dot} `)
+								.replace(fatalPrefixRegex, '')
+								.replace(newlineOrReturnRegex, ` \u2022 `)
 				} [${duration}ms]${status}`,
 			);
 		} else if (slow) {
 			Logger.warn(
-				`${getLoggableScopeBlockOverride(id ? `GIT:←${id}` : 'GIT', `*${duration}ms`)} ${command} [*${duration}ms]${status}`,
+				`${formatLoggableScopeBlock(id ? `GIT ←${id}` : 'GIT', `*${duration}ms`)} ${command} [*${duration}ms]${status}`,
 			);
 		} else {
-			Logger.log(
-				`${getLoggableScopeBlockOverride(id ? `GIT:←${id}` : 'GIT', `${duration}ms`)} ${command} [${duration}ms]${status}`,
+			Logger.info(
+				`${formatLoggableScopeBlock(id ? `GIT ←${id}` : 'GIT', `${duration}ms`)} ${command} [${duration}ms]${status}`,
 			);
 		}
 
 		this.logCore(
-			`${getLoggableScopeBlockOverride(`${id ? `←${id}` : ''}${slow ? '*' : ''}`, `${duration}ms`)} ${command}${status}`,
+			`${formatLoggableScopeBlock(`${id ? `←${id}` : ''}${slow ? '*' : ''}`, `${duration}ms`)} ${command}${status}`,
 			ex,
 		);
 	}
 
-	private _gitOutput: OutputChannel | undefined;
+	private _gitOutput: LogOutputChannel | undefined;
+	private get gitOutput(): LogOutputChannel {
+		return (this._gitOutput ??= window.createOutputChannel('GitLens (Git)', { log: true }));
+	}
 
 	private logCore(message: string, ex?: Error | undefined): void {
-		if (!Logger.enabled(ex != null ? 'error' : 'debug')) return;
-
-		this._gitOutput ??= window.createOutputChannel('GitLens (Git)', { log: true });
-		this._gitOutput.appendLine(`${Logger.timestamp} ${message}${ex != null ? ` ${GlyphChars.Dot} FAILED` : ''}`);
 		if (ex != null) {
-			this._gitOutput.appendLine(`\n${String(ex)}\n`);
+			this.gitOutput.error(`${message} \u2022 FAILED\n${String(ex)}`);
+		} else {
+			this.gitOutput.info(message);
 		}
 	}
 }

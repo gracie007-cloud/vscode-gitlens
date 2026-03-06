@@ -5,7 +5,6 @@ import { proBadge } from '../constants.js';
 import type { Container } from '../container.js';
 import { GitUri } from '../git/gitUri.js';
 import type { RepositoryChangeEvent } from '../git/models/repository.js';
-import { RepositoryChange, RepositoryChangeComparisonMode } from '../git/models/repository.js';
 import type { GitWorktree } from '../git/models/worktree.js';
 import { ensurePlusFeaturesEnabled } from '../plus/gk/utils/-webview/plus.utils.js';
 import { executeCommand } from '../system/-webview/command.js';
@@ -30,21 +29,11 @@ export class WorktreesRepositoryNode extends RepositoryFolderNode<WorktreesView,
 	}
 
 	protected changed(e: RepositoryChangeEvent): boolean {
-		if (this.view.config.showStashes && e.changed(RepositoryChange.Stash, RepositoryChangeComparisonMode.Any)) {
+		if (this.view.config.showStashes && e.changed('stash')) {
 			return true;
 		}
 
-		return e.changed(
-			RepositoryChange.Config,
-			RepositoryChange.Heads,
-			RepositoryChange.Index,
-			RepositoryChange.Remotes,
-			RepositoryChange.RemoteProviders,
-			RepositoryChange.PausedOperationStatus,
-			RepositoryChange.Worktrees,
-			RepositoryChange.Unknown,
-			RepositoryChangeComparisonMode.Any,
-		);
+		return e.changed('config', 'heads', 'index', 'remotes', 'remoteProviders', 'pausedOp', 'worktrees', 'unknown');
 	}
 }
 

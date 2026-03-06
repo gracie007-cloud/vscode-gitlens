@@ -12,7 +12,6 @@ import type { GitBranch } from '../../git/models/branch.js';
 import type { GitCommit } from '../../git/models/commit.js';
 import type { GitReference } from '../../git/models/reference.js';
 import type { Repository, RepositoryChangeEvent } from '../../git/models/repository.js';
-import { RepositoryChange, RepositoryChangeComparisonMode } from '../../git/models/repository.js';
 import type { RepositoryIdentity } from '../../git/models/repositoryIdentities.js';
 import { missingRepositoryId } from '../../git/models/repositoryIdentities.js';
 import type { GitTag } from '../../git/models/tag.js';
@@ -28,10 +27,10 @@ import { configuration } from '../../system/-webview/configuration.js';
 import { getOrOpenTextEditor } from '../../system/-webview/vscode/editors.js';
 import type { OpenWorkspaceLocation } from '../../system/-webview/vscode/workspaces.js';
 import { openWorkspace } from '../../system/-webview/vscode/workspaces.js';
-import { debug } from '../../system/decorators/log.js';
+import { trace } from '../../system/decorators/log.js';
 import { once } from '../../system/event.js';
 import { Logger } from '../../system/logger.js';
-import { getLogScope } from '../../system/logger.scope.js';
+import { getScopedLogger } from '../../system/logger.scope.js';
 import { maybeUri, normalizePath } from '../../system/path.js';
 import { isWalkthroughSupported } from '../../telemetry/walkthroughStateProvider.js';
 import { showInspectView } from '../../webviews/commitDetails/actions.js';
@@ -313,9 +312,9 @@ export class DeepLinkService implements Disposable {
 		}
 	}
 
-	@debug()
+	@trace()
 	private async processPendingDeepLink(pendingDeepLink: StoredDeepLinkContext | undefined) {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		if (pendingDeepLink == null) return;
 
@@ -598,7 +597,7 @@ export class DeepLinkService implements Disposable {
 	// TODO @axosoft-ramint: Move all the logic for matching a repo, prompting to add repo, matching remote, etc. for a target (branch, PR, etc.)
 	// to a separate service where it can be used outside of the context of deep linking. Then the deep link service should leverage it,
 	// and we should stop using deep links to process things like Launchpad switch actions, Open in Worktree command, etc.
-	@debug()
+	@trace()
 	private async processDeepLink(
 		initialAction: DeepLinkServiceAction = DeepLinkServiceAction.DeepLinkEventFired,
 		useProgress: boolean = true,
@@ -856,14 +855,12 @@ export class DeepLinkService implements Disposable {
 						}
 					}
 
-					if (repoOpenType == null) {
-						repoOpenType = await this.showOpenTypePrompt({
-							customMessage:
-								chosenRepoPath === 'Choose a different location'
-									? 'Please choose an option to open the repository'
-									: undefined,
-						});
-					}
+					repoOpenType ??= await this.showOpenTypePrompt({
+						customMessage:
+							chosenRepoPath === 'Choose a different location'
+								? 'Please choose an option to open the repository'
+								: undefined,
+					});
 
 					if (!repoOpenType) {
 						action = DeepLinkServiceAction.DeepLinkCancelled;
@@ -877,21 +874,19 @@ export class DeepLinkService implements Disposable {
 					}
 					this._context.repoOpenLocation = repoOpenLocation;
 
-					if (this._context.repoOpenUri == null) {
-						this._context.repoOpenUri = (
-							await window.showOpenDialog({
-								title: `Choose a ${repoOpenType === 'workspace' ? 'workspace' : 'folder'} to ${
-									repoOpenType === 'clone' ? 'clone the repository to' : 'open the repository'
-								}`,
-								canSelectFiles: repoOpenType === 'workspace',
-								canSelectFolders: repoOpenType !== 'workspace',
-								canSelectMany: false,
-								...(repoOpenType === 'workspace' && {
-									filters: { Workspaces: ['code-workspace'] },
-								}),
-							})
-						)?.[0];
-					}
+					this._context.repoOpenUri ??= (
+						await window.showOpenDialog({
+							title: `Choose a ${repoOpenType === 'workspace' ? 'workspace' : 'folder'} to ${
+								repoOpenType === 'clone' ? 'clone the repository to' : 'open the repository'
+							}`,
+							canSelectFiles: repoOpenType === 'workspace',
+							canSelectFolders: repoOpenType !== 'workspace',
+							canSelectMany: false,
+							...(repoOpenType === 'workspace' && {
+								filters: { Workspaces: ['code-workspace'] },
+							}),
+						})
+					)?.[0];
 
 					if (!this._context.repoOpenUri) {
 						action = DeepLinkServiceAction.DeepLinkCancelled;
@@ -1458,10 +1453,10 @@ export class DeepLinkService implements Disposable {
 						// Only proceed if the branch switch occurred in the current window. This is necessary because the switch flow may
 						// open a new window, and if it does, we need to end things here.
 						const didChangeBranch = await Promise.race([
-							new Promise<boolean>(resolve => setTimeout(() => resolve(false), 10000)),
+							new Promise<boolean>(resolve => setTimeout(resolve, 10000, false)),
 							new Promise<boolean>(resolve =>
 								once(repo.onDidChange)(async (e: RepositoryChangeEvent) => {
-									if (e.changed(RepositoryChange.Head, RepositoryChangeComparisonMode.Any)) {
+									if (e.changed('head')) {
 										if (
 											(await repo.git.branches.getBranch())?.name !== this._context.currentBranch
 										) {

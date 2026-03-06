@@ -3,12 +3,11 @@ import { MarkdownString, TreeItem, TreeItemCollapsibleState } from 'vscode';
 import { GlyphChars } from '../../../constants.js';
 import type { GitUri } from '../../../git/gitUri.js';
 import type { Repository, RepositoryChangeEvent } from '../../../git/models/repository.js';
-import { RepositoryChange, RepositoryChangeComparisonMode } from '../../../git/models/repository.js';
 import { getRepositoryIconPath } from '../../../git/utils/-webview/icons.js';
 import { formatLastFetched } from '../../../git/utils/-webview/repository.utils.js';
 import { getHighlanderProviders } from '../../../git/utils/remote.utils.js';
 import { gate } from '../../../system/decorators/gate.js';
-import { debug, log } from '../../../system/decorators/log.js';
+import { debug, trace } from '../../../system/decorators/log.js';
 import { weakEvent } from '../../../system/event.js';
 import { basename } from '../../../system/path.js';
 import { pad } from '../../../system/string.js';
@@ -123,7 +122,7 @@ export abstract class RepositoryFolderNode<
 		const branch = this._cachedBranch;
 		if (branch == null) return item;
 
-		const { isWorktree } = this.repo;
+		const { isSubmodule, isWorktree } = this.repo;
 		const lastFetched = this._cachedLastFetched ?? 0;
 
 		let providerName;
@@ -140,7 +139,7 @@ export abstract class RepositoryFolderNode<
 		item.tooltip = new MarkdownString(
 			`${this.repo.name ?? this.uri.repoPath ?? ''}${
 				lastFetched ? `${pad(GlyphChars.Dash, 2, 2)}Last fetched ${formatLastFetched(lastFetched, false)}` : ''
-			}${this.repo.name ? `\\\n$(folder) ${isWorktree ? '(worktree) ' : ''}${this.uri.repoPath}` : ''}\n\nCurrent branch $(git-branch) ${branch.name}${
+			}${this.repo.name ? `\\\n$(folder) ${isSubmodule ? '(submodule) ' : isWorktree ? '(worktree) ' : ''}${this.uri.repoPath}` : ''}\n\nCurrent branch $(git-branch) ${branch.name}${
 				branch.upstream != null
 					? ` is ${branch.getTrackingStatus({
 							empty: branch.upstream.missing
@@ -172,26 +171,26 @@ export abstract class RepositoryFolderNode<
 	}
 
 	@gate()
-	@debug()
+	@trace()
 	override async refresh(reset: boolean = false): Promise<void> {
 		await super.refresh(reset);
 		await this.child?.triggerChange(reset, false, this);
 		await this.ensureSubscription();
 	}
 
-	@log()
+	@debug()
 	async star(): Promise<void> {
 		await this.repo.star();
 		// void this.parent!.triggerChange();
 	}
 
-	@log()
+	@debug()
 	async unstar(): Promise<void> {
 		await this.repo.unstar();
 		// void this.parent!.triggerChange();
 	}
 
-	@debug()
+	@trace()
 	protected subscribe(): Disposable | Promise<Disposable> {
 		return weakEvent(this.repo.onDidChange, this.onRepositoryChanged, this);
 	}
@@ -202,19 +201,16 @@ export abstract class RepositoryFolderNode<
 
 	protected abstract changed(e: RepositoryChangeEvent): boolean;
 
-	@debug<RepositoryFolderNode['onRepositoryChanged']>({ args: { 0: e => e.toString() } })
+	@trace()
 	private onRepositoryChanged(e: RepositoryChangeEvent) {
-		if (e.changed(RepositoryChange.Closed, RepositoryChangeComparisonMode.Any)) {
+		if (e.changed('closed')) {
 			this.dispose();
 			void this.parent?.triggerChange(true);
 
 			return;
 		}
 
-		if (
-			e.changed(RepositoryChange.Opened, RepositoryChangeComparisonMode.Any) ||
-			e.changed(RepositoryChange.Starred, RepositoryChangeComparisonMode.Any)
-		) {
+		if (e.changed('opened', 'starred')) {
 			void this.parent?.triggerChange(true);
 
 			return;

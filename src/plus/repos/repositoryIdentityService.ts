@@ -14,9 +14,8 @@ import type {
 } from '../../git/models/repositoryIdentities.js';
 import { missingRepositoryId } from '../../git/models/repositoryIdentities.js';
 import { parseGitRemoteUrl } from '../../git/parsers/remoteParser.js';
-import { log } from '../../system/decorators/log.js';
-import { Logger } from '../../system/logger.js';
-import { getLogScope } from '../../system/logger.scope.js';
+import { debug } from '../../system/decorators/log.js';
+import { getScopedLogger } from '../../system/logger.scope.js';
 import { getSettledValue } from '../../system/promise.js';
 
 export class RepositoryIdentityService implements Disposable {
@@ -27,7 +26,7 @@ export class RepositoryIdentityService implements Disposable {
 
 	dispose(): void {}
 
-	@log()
+	@debug()
 	getRepository<T extends string | GkProviderId>(
 		identity: RepositoryIdentityDescriptor<T>,
 		options?: { openIfNeeded?: boolean; keepOpen?: boolean; prompt?: boolean; skipRefValidation?: boolean },
@@ -35,7 +34,7 @@ export class RepositoryIdentityService implements Disposable {
 		return this.locateRepository(identity, options);
 	}
 
-	@log()
+	@debug()
 	async getRepositoryIdentity<T extends string | GkProviderId>(
 		repository: Repository,
 	): Promise<RepositoryIdentityDescriptor<T>> {
@@ -53,7 +52,7 @@ export class RepositoryIdentityService implements Disposable {
 		};
 	}
 
-	@log()
+	@debug()
 	private async locateRepository<T extends string | GkProviderId>(
 		identity: RepositoryIdentityDescriptor<T>,
 		options?: { openIfNeeded?: boolean; keepOpen?: boolean; prompt?: boolean; skipRefValidation?: boolean },
@@ -166,7 +165,7 @@ export class RepositoryIdentityService implements Disposable {
 		return foundRepo;
 	}
 
-	@log({ args: { 1: false } })
+	@debug({ args: (repo: Repository) => ({ repo: repo.id }) })
 	async storeRepositoryLocation<T extends string | GkProviderId>(
 		repo: Repository,
 		identity?: RepositoryIdentityDescriptor<T>,
@@ -203,11 +202,11 @@ export class RepositoryIdentityService implements Disposable {
 		}
 	}
 
-	@log<RepositoryIdentityService['storeRepositoryLocations']>({ args: { 0: repos => repos.length } })
+	@debug({ args: repos => ({ repos: repos.length }) })
 	async storeRepositoryLocations(repos: Repository[]): Promise<void> {
 		if (!repos.length || this.locator == null) return;
 
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		// Use batched method if available, otherwise fall back to sequential
 		if (this.locator.storeLocations == null) {
@@ -215,7 +214,7 @@ export class RepositoryIdentityService implements Disposable {
 				try {
 					await this.storeRepositoryLocation(repo);
 				} catch (ex) {
-					Logger.error(ex, scope);
+					scope?.error(ex);
 				}
 			}
 			return;
@@ -288,7 +287,7 @@ export class RepositoryIdentityService implements Disposable {
 			try {
 				await this.locator.storeLocations(entries);
 			} catch (ex) {
-				Logger.error(ex, scope);
+				scope?.error(ex);
 			}
 		}
 	}

@@ -9,7 +9,6 @@ import { GitCommit, GitCommitIdentity } from '../../../../git/models/commit.js';
 import { GitFileChange } from '../../../../git/models/fileChange.js';
 import type { GitFileStatus } from '../../../../git/models/fileStatus.js';
 import { GitFileWorkingTreeStatus } from '../../../../git/models/fileStatus.js';
-import { RepositoryChange } from '../../../../git/models/repository.js';
 import type { GitStash } from '../../../../git/models/stash.js';
 import type { ParsedStash, ParsedStashWithFiles } from '../../../../git/parsers/logParser.js';
 import {
@@ -21,7 +20,7 @@ import { configuration } from '../../../../system/-webview/configuration.js';
 import { splitPath } from '../../../../system/-webview/path.js';
 import { countStringLength } from '../../../../system/array.js';
 import { gate } from '../../../../system/decorators/gate.js';
-import { log } from '../../../../system/decorators/log.js';
+import { debug } from '../../../../system/decorators/log.js';
 import { min, skip } from '../../../../system/iterable.js';
 import { getSettledValue } from '../../../../system/promise.js';
 import type { Git } from '../git.js';
@@ -38,7 +37,7 @@ export class StashGitSubProvider implements GitStashSubProvider {
 	) {}
 
 	@gate()
-	@log()
+	@debug()
 	async applyStash(repoPath: string, stashName: string, options?: { deleteAfter?: boolean }): Promise<void> {
 		if (!stashName) return;
 
@@ -46,7 +45,7 @@ export class StashGitSubProvider implements GitStashSubProvider {
 
 		try {
 			await this.git.exec({ cwd: repoPath }, ...args);
-			this.container.events.fire('git:repo:change', { repoPath: repoPath, changes: [RepositoryChange.Stash] });
+			this.container.events.fire('git:repo:change', { repoPath: repoPath, changes: ['stash'] });
 		} catch (ex) {
 			if (ex instanceof Error) {
 				const msg: string = ex.message ?? '';
@@ -56,6 +55,9 @@ export class StashGitSubProvider implements GitStashSubProvider {
 						((ex.stdout?.includes('Auto-merging') && ex.stdout.includes('CONFLICT')) ||
 							ex.stdout?.includes('needs merge')))
 				) {
+					this.container.telemetry.sendEvent('gitCommand/conflict', {
+						command: options?.deleteAfter ? 'stash-pop' : 'stash-apply',
+					});
 					void window.showInformationMessage('Stash applied with conflicts');
 					return;
 				}
@@ -73,7 +75,7 @@ export class StashGitSubProvider implements GitStashSubProvider {
 		}
 	}
 
-	@log()
+	@debug()
 	async getStash(
 		repoPath: string,
 		options?: { reachableFrom?: string },
@@ -118,7 +120,7 @@ export class StashGitSubProvider implements GitStashSubProvider {
 						{
 							cwd: repoPath,
 							cancellation: cancellation,
-							stdin: Array.from(parentShas).join('\n'),
+							stdin: [...parentShas].join('\n'),
 						},
 						'log',
 						...datesParser.arguments,
@@ -207,7 +209,7 @@ export class StashGitSubProvider implements GitStashSubProvider {
 		return { ...stash, stashes: stashes };
 	}
 
-	@log()
+	@debug()
 	async getStashCommitFiles(
 		repoPath: string,
 		ref: string,
@@ -279,6 +281,9 @@ export class StashGitSubProvider implements GitStashSubProvider {
 										changes: 0,
 									}
 								: undefined,
+							undefined,
+							undefined,
+							f.mode,
 						),
 				) ?? []
 			);
@@ -287,10 +292,10 @@ export class StashGitSubProvider implements GitStashSubProvider {
 		return undefined;
 	}
 
-	@log()
+	@debug()
 	async deleteStash(repoPath: string, stashName: string, sha?: string): Promise<void> {
 		await this.deleteStashCore(repoPath, stashName, sha);
-		this.container.events.fire('git:repo:change', { repoPath: repoPath, changes: [RepositoryChange.Stash] });
+		this.container.events.fire('git:repo:change', { repoPath: repoPath, changes: ['stash'] });
 		this.container.events.fire('git:cache:reset', { repoPath: repoPath, types: ['stashes'] });
 	}
 
@@ -316,7 +321,7 @@ export class StashGitSubProvider implements GitStashSubProvider {
 		return result.stdout;
 	}
 
-	@log()
+	@debug()
 	async renameStash(
 		repoPath: string,
 		stashName: string,
@@ -334,11 +339,11 @@ export class StashGitSubProvider implements GitStashSubProvider {
 			sha,
 		);
 
-		this.container.events.fire('git:repo:change', { repoPath: repoPath, changes: [RepositoryChange.Stash] });
+		this.container.events.fire('git:repo:change', { repoPath: repoPath, changes: ['stash'] });
 		this.container.events.fire('git:cache:reset', { repoPath: repoPath, types: ['stashes'] });
 	}
 
-	@log<StashGitSubProvider['saveStash']>({ args: { 2: uris => uris?.length } })
+	@debug({ args: (repoPath, message, uris) => ({ repoPath: repoPath, message: message, uris: uris?.length }) })
 	async saveStash(
 		repoPath: string,
 		message?: string,
@@ -347,7 +352,7 @@ export class StashGitSubProvider implements GitStashSubProvider {
 	): Promise<void> {
 		if (!uris?.length) {
 			await this.git.stash__push(repoPath, message, options);
-			this.container.events.fire('git:repo:change', { repoPath: repoPath, changes: [RepositoryChange.Stash] });
+			this.container.events.fire('git:repo:change', { repoPath: repoPath, changes: ['stash'] });
 			this.container.events.fire('git:cache:reset', { repoPath: repoPath, types: ['stashes', 'status'] });
 			return;
 		}
@@ -383,7 +388,7 @@ export class StashGitSubProvider implements GitStashSubProvider {
 		this.container.events.fire('git:cache:reset', { repoPath: repoPath, types: ['stashes', 'status'] });
 	}
 
-	@log()
+	@debug()
 	async saveSnapshot(repoPath: string, message?: string): Promise<void> {
 		const result = await this.git.exec({ cwd: repoPath }, 'stash', 'create');
 		const id = result.stdout.trim() || undefined;
@@ -395,7 +400,7 @@ export class StashGitSubProvider implements GitStashSubProvider {
 		}
 		await this.git.exec({ cwd: repoPath }, 'stash', 'store', ...args, id);
 
-		this.container.events.fire('git:repo:change', { repoPath: repoPath, changes: [RepositoryChange.Stash] });
+		this.container.events.fire('git:repo:change', { repoPath: repoPath, changes: ['stash'] });
 		this.container.events.fire('git:cache:reset', { repoPath: repoPath, types: ['stashes'] });
 	}
 }

@@ -5,7 +5,6 @@ import type { Container } from '../container.js';
 import { GitUri } from '../git/gitUri.js';
 import type { GitTagReference } from '../git/models/reference.js';
 import type { RepositoryChangeEvent } from '../git/models/repository.js';
-import { RepositoryChange, RepositoryChangeComparisonMode } from '../git/models/repository.js';
 import { getReferenceLabel } from '../git/utils/reference.utils.js';
 import { executeCommand } from '../system/-webview/command.js';
 import { configuration } from '../system/-webview/configuration.js';
@@ -23,15 +22,13 @@ import { registerViewCommand } from './viewCommands.js';
 
 export class TagsRepositoryNode extends RepositoryFolderNode<TagsView, TagsNode> {
 	async getChildren(): Promise<ViewNode[]> {
-		if (this.child == null) {
-			this.child = new TagsNode(this.uri, this.view, this, this.repo);
-		}
+		this.child ??= new TagsNode(this.uri, this.view, this, this.repo);
 
 		return this.child.getChildren();
 	}
 
 	protected changed(e: RepositoryChangeEvent): boolean {
-		return e.changed(RepositoryChange.Tags, RepositoryChange.Unknown, RepositoryChangeComparisonMode.Any);
+		return e.changed('tags', 'unknown');
 	}
 }
 

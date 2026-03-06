@@ -2,14 +2,13 @@ import { window } from 'vscode';
 import type { Source } from '../../../../constants.telemetry.js';
 import type { Container } from '../../../../container.js';
 import { CancellationError } from '../../../../errors.js';
-import type { SigningErrorReason } from '../../../../git/errors.js';
+import type { GitCommandContext, SigningErrorReason } from '../../../../git/errors.js';
 import { ApplyPatchCommitError, CherryPickError, SigningError } from '../../../../git/errors.js';
 import type { GitPatchSubProvider } from '../../../../git/gitProvider.js';
 import type { GitCommit, GitCommitIdentityShape } from '../../../../git/models/commit.js';
 import type { SigningFormat } from '../../../../git/models/signature.js';
-import { log } from '../../../../system/decorators/log.js';
-import { Logger } from '../../../../system/logger.js';
-import { getLogScope } from '../../../../system/logger.scope.js';
+import { debug } from '../../../../system/decorators/log.js';
+import { getScopedLogger } from '../../../../system/logger.scope.js';
 import { getSettledValue } from '../../../../system/promise.js';
 import type { Git } from '../git.js';
 import { gitConfigsLog } from '../git.js';
@@ -22,7 +21,7 @@ export class PatchGitSubProvider implements GitPatchSubProvider {
 		private readonly provider: LocalGitProviderInternal,
 	) {}
 
-	@log()
+	@debug()
 	async applyUnreachableCommitForPatch(
 		repoPath: string,
 		rev: string,
@@ -33,7 +32,7 @@ export class PatchGitSubProvider implements GitPatchSubProvider {
 			stash?: boolean | 'prompt';
 		},
 	): Promise<void> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		if (options?.stash) {
 			// Stash any changes first
@@ -55,7 +54,7 @@ export class PatchGitSubProvider implements GitPatchSubProvider {
 				try {
 					await this.git.stash__push(repoPath, undefined, { includeUntracked: true });
 				} catch (ex) {
-					Logger.error(ex, scope);
+					scope?.error(ex);
 					throw new ApplyPatchCommitError({ reason: 'stashFailed' }, ex);
 				}
 			}
@@ -94,7 +93,7 @@ export class PatchGitSubProvider implements GitPatchSubProvider {
 
 				targetPath = worktree.uri.fsPath;
 			} catch (ex) {
-				Logger.error(ex, scope);
+				scope?.error(ex);
 				throw new ApplyPatchCommitError({ reason: 'createWorktreeFailed' }, ex);
 			}
 		}
@@ -106,7 +105,7 @@ export class PatchGitSubProvider implements GitPatchSubProvider {
 					createBranch: shouldCreate ? options.branchName : undefined,
 				});
 			} catch (ex) {
-				Logger.error(ex, scope);
+				scope?.error(ex);
 				throw new ApplyPatchCommitError({ reason: 'checkoutFailed', branch: options.branchName }, ex);
 			}
 		}
@@ -115,7 +114,7 @@ export class PatchGitSubProvider implements GitPatchSubProvider {
 		try {
 			await this.provider.ops.cherryPick(targetPath, [rev], { noCommit: true });
 		} catch (ex) {
-			Logger.error(ex, scope);
+			scope?.error(ex);
 			if (CherryPickError.is(ex, 'conflicts')) {
 				throw new ApplyPatchCommitError({ reason: 'appliedWithConflicts' }, ex);
 			}
@@ -128,7 +127,14 @@ export class PatchGitSubProvider implements GitPatchSubProvider {
 		}
 	}
 
-	@log({ args: { 2: '<message>', 3: '<patch>' } })
+	@debug({
+		args: (repoPath, base, _message, _patch) => ({
+			repoPath: repoPath,
+			base: base,
+			message: '<message>',
+			patch: '<patch>',
+		}),
+	})
 	async createUnreachableCommitForPatch(
 		repoPath: string,
 		base: string,
@@ -153,7 +159,7 @@ export class PatchGitSubProvider implements GitPatchSubProvider {
 		return await this.provider.commits.getCommit(repoPath, sha);
 	}
 
-	@log<PatchGitSubProvider['createUnreachableCommitsFromPatches']>({ args: { 2: p => p.length } })
+	@debug({ args: (repoPath, base, patches) => ({ repoPath: repoPath, base: base, patches: patches.length }) })
 	async createUnreachableCommitsFromPatches(
 		repoPath: string,
 		base: string | undefined,
@@ -194,7 +200,7 @@ export class PatchGitSubProvider implements GitPatchSubProvider {
 		author?: GitCommitIdentityShape,
 		options?: { sign?: boolean; source?: Source },
 	): Promise<string> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		if (!patch.endsWith('\n')) {
 			patch += '\n';
@@ -254,35 +260,36 @@ export class PatchGitSubProvider implements GitPatchSubProvider {
 
 			return sha;
 		} catch (ex) {
-			Logger.error(ex, scope);
+			scope?.error(ex);
 
 			// Handle signing-specific errors
 			if (shouldSign && ex instanceof Error) {
 				const errorMessage = ex.message.toLowerCase();
+				const gitCommand: GitCommandContext = { repoPath: repoPath, args: ['commit-tree'] };
 				let signingError: SigningError | undefined;
 
 				if (errorMessage.includes('gpg failed to sign') || errorMessage.includes('error: gpg')) {
-					signingError = new SigningError('passphraseFailed', ex, ex.message);
+					signingError = new SigningError({ reason: 'passphraseFailed', gitCommand: gitCommand }, ex);
 				} else if (
 					errorMessage.includes('secret key not available') ||
 					errorMessage.includes('no secret key') ||
 					errorMessage.includes('no signing key')
 				) {
-					signingError = new SigningError('noKey', ex, ex.message);
+					signingError = new SigningError({ reason: 'noKey', gitCommand: gitCommand }, ex);
 				} else if (
 					errorMessage.includes('gpg: command not found') ||
 					(errorMessage.includes('gpg') && errorMessage.includes('not found'))
 				) {
-					signingError = new SigningError('gpgNotFound', ex, ex.message);
+					signingError = new SigningError({ reason: 'gpgNotFound', gitCommand: gitCommand }, ex);
 				} else if (errorMessage.includes('ssh-keygen') && errorMessage.includes('not found')) {
-					signingError = new SigningError('sshNotFound', ex, ex.message);
+					signingError = new SigningError({ reason: 'sshNotFound', gitCommand: gitCommand }, ex);
 				}
 
 				if (signingError != null) {
 					// Send telemetry for signing failure
 					this.container.telemetry.sendEvent(
 						'commit/signing/failed',
-						{ reason: this.getSigningFailureReason(signingError.reason), format: signingFormat },
+						{ reason: this.getSigningFailureReason(signingError.details.reason), format: signingFormat },
 						options?.source,
 					);
 					throw signingError;
@@ -308,7 +315,7 @@ export class PatchGitSubProvider implements GitPatchSubProvider {
 		return result.stdout.trim();
 	}
 
-	@log({ args: { 1: false } })
+	@debug({ args: repoPath => ({ repoPath: repoPath }) })
 	async validatePatch(repoPath: string | undefined, contents: string): Promise<boolean> {
 		try {
 			await this.git.exec({ cwd: repoPath, configs: gitConfigsLog, stdin: contents }, 'apply', '--check', '-');

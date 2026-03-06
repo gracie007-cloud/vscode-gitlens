@@ -8,7 +8,6 @@ import { isCommit } from '../git/models/commit.js';
 import type { GitBranchReference, GitRevisionReference } from '../git/models/reference.js';
 import type { GitRemote } from '../git/models/remote.js';
 import type { RepositoryChangeEvent } from '../git/models/repository.js';
-import { RepositoryChange, RepositoryChangeComparisonMode } from '../git/models/repository.js';
 import { getRemoteNameFromBranchName } from '../git/utils/branch.utils.js';
 import { getReferenceLabel } from '../git/utils/reference.utils.js';
 import { executeCommand } from '../system/-webview/command.js';
@@ -30,21 +29,13 @@ import { registerViewCommand } from './viewCommands.js';
 
 export class RemotesRepositoryNode extends RepositoryFolderNode<RemotesView, RemotesNode> {
 	async getChildren(): Promise<ViewNode[]> {
-		if (this.child == null) {
-			this.child = new RemotesNode(this.uri, this.view, this, this.repo);
-		}
+		this.child ??= new RemotesNode(this.uri, this.view, this, this.repo);
 
 		return this.child.getChildren();
 	}
 
 	protected changed(e: RepositoryChangeEvent): boolean {
-		return e.changed(
-			RepositoryChange.Config,
-			RepositoryChange.Remotes,
-			RepositoryChange.RemoteProviders,
-			RepositoryChange.Unknown,
-			RepositoryChangeComparisonMode.Any,
-		);
+		return e.changed('config', 'remotes', 'remoteProviders', 'unknown');
 	}
 }
 

@@ -7,9 +7,8 @@ import type {
 } from '../../../git/location/repositorylocationProvider.js';
 import type { LocalRepoDataMap } from '../../../git/models/pathMapping.js';
 import type { SharedGkStorageLocationProvider } from '../../../plus/repos/sharedGkStorageLocationProvider.js';
-import { debug, log } from '../../../system/decorators/log.js';
-import { Logger } from '../../../system/logger.js';
-import { getLogScope } from '../../../system/logger.scope.js';
+import { debug, trace } from '../../../system/decorators/log.js';
+import { getScopedLogger } from '../../../system/logger.scope.js';
 
 export class LocalRepositoryLocationProvider implements RepositoryLocationProvider, Disposable {
 	constructor(
@@ -32,7 +31,7 @@ export class LocalRepositoryLocationProvider implements RepositoryLocationProvid
 		return this._localRepoDataMap ?? {};
 	}
 
-	@log()
+	@debug()
 	async getLocation(
 		remoteUrl: string,
 		repoInfo?: { provider?: string; owner?: string; repoName?: string },
@@ -62,20 +61,20 @@ export class LocalRepositoryLocationProvider implements RepositoryLocationProvid
 		return localRepoDataMap[key]?.paths;
 	}
 
-	@debug()
+	@trace()
 	private async loadLocalRepoDataMap() {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		const localFileUri = await this.sharedStorage.getSharedRepositoryLocationFileUri();
 		try {
 			const data = await workspace.fs.readFile(localFileUri);
 			this._localRepoDataMap = (JSON.parse(data.toString()) ?? {}) as LocalRepoDataMap;
 		} catch (ex) {
-			Logger.error(ex, scope);
+			scope?.error(ex);
 		}
 	}
 
-	@log()
+	@debug()
 	async storeLocation(
 		path: string,
 		remoteUrl: string | undefined,
@@ -91,11 +90,11 @@ export class LocalRepositoryLocationProvider implements RepositoryLocationProvid
 		}
 	}
 
-	@log<LocalRepositoryLocationProvider['storeLocations']>({ args: { 0: entries => entries.length } })
+	@debug({ args: entries => ({ entries: entries.length }) })
 	async storeLocations(entries: RepositoryLocationEntry[]): Promise<void> {
 		if (!entries.length) return;
 
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		await using lock = await this.sharedStorage.acquireSharedStorageWriteLock();
 		if (lock == null) return;
@@ -126,15 +125,15 @@ export class LocalRepositoryLocationProvider implements RepositoryLocationProvid
 		try {
 			await workspace.fs.writeFile(localFileUri, outputData);
 		} catch (ex) {
-			Logger.error(ex, scope);
+			scope?.error(ex);
 		}
 	}
 
-	@debug()
+	@trace()
 	private async storeLocationCore(key: string, path: string): Promise<void> {
 		if (!key || !path) return;
 
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		await using lock = await this.sharedStorage.acquireSharedStorageWriteLock();
 		if (lock == null) return;
@@ -149,7 +148,7 @@ export class LocalRepositoryLocationProvider implements RepositoryLocationProvid
 		try {
 			await workspace.fs.writeFile(localFileUri, outputData);
 		} catch (ex) {
-			Logger.error(ex, scope);
+			scope?.error(ex);
 		}
 	}
 

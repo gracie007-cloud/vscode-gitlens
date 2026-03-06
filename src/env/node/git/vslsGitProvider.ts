@@ -6,9 +6,9 @@ import type { GitProviderDescriptor } from '../../../git/gitProvider.js';
 import type { Repository } from '../../../git/models/repository.js';
 import { isFolderUri } from '../../../system/-webview/path.js';
 import { addVslsPrefixIfNeeded } from '../../../system/-webview/path.vsls.js';
-import { debug } from '../../../system/decorators/log.js';
-import { Logger } from '../../../system/logger.js';
-import { getLogScope } from '../../../system/logger.scope.js';
+import { gate } from '../../../system/decorators/gate.js';
+import { trace } from '../../../system/decorators/log.js';
+import { getScopedLogger } from '../../../system/logger.scope.js';
 import { Git } from './git.js';
 import { LocalGitProvider } from './localGitProvider.js';
 
@@ -57,11 +57,11 @@ export class VslsGitProvider extends LocalGitProvider {
 	};
 	override readonly supportedSchemes = new Set<string>([Schemes.Vsls, Schemes.VslsScc]);
 
-	@debug({ exit: true })
+	@trace({ exit: true })
 	override async discoverRepositories(uri: Uri): Promise<Repository[]> {
 		if (!this.supportedSchemes.has(uri.scheme)) return [];
 
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		try {
 			const guest = await this.container.vsls.guest();
@@ -74,14 +74,14 @@ export class VslsGitProvider extends LocalGitProvider {
 
 				const gitDir = await this.config.getGitDir(repoUri.fsPath);
 				if (gitDir == null) {
-					Logger.warn(scope, `Unable to get gitDir for '${repoUri.toString(true)}'`);
+					scope?.warn(`Unable to get gitDir for '${repoUri.toString(true)}'`);
 				}
 
 				result.push(...this.openRepository(undefined, repoUri, gitDir, r.root, r.closed));
 			}
 			return result;
 		} catch (ex) {
-			Logger.error(ex, scope);
+			scope?.error(ex);
 			debugger;
 
 			return [];
@@ -105,14 +105,14 @@ export class VslsGitProvider extends LocalGitProvider {
 		return super.getAbsoluteUri(pathOrUri, base).with({ scheme: scheme });
 	}
 
+	@gate()
+	@trace({ exit: true })
 	override async findRepositoryUri(uri: Uri, isDirectory?: boolean): Promise<Uri | undefined> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		let repoPath: string | undefined;
 		try {
-			if (isDirectory == null) {
-				isDirectory = await isFolderUri(uri);
-			}
+			isDirectory ??= await isFolderUri(uri);
 
 			// If the uri isn't a directory, go up one level
 			if (!isDirectory) {
@@ -130,7 +130,7 @@ export class VslsGitProvider extends LocalGitProvider {
 
 			return repoPath ? Uri.parse(repoPath, true) : undefined;
 		} catch (ex) {
-			Logger.error(ex, scope);
+			scope?.error(ex);
 			return undefined;
 		}
 	}

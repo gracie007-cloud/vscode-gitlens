@@ -13,9 +13,8 @@ import { parseGitStatus } from '../../../../git/parsers/statusParser.js';
 import { configuration } from '../../../../system/-webview/configuration.js';
 import { splitPath } from '../../../../system/-webview/path.js';
 import { gate } from '../../../../system/decorators/gate.js';
-import { log } from '../../../../system/decorators/log.js';
-import { Logger } from '../../../../system/logger.js';
-import { getLogScope, setLogScopeExit } from '../../../../system/logger.scope.js';
+import { debug } from '../../../../system/decorators/log.js';
+import { getScopedLogger } from '../../../../system/logger.scope.js';
 import { stripFolderGlob } from '../../../../system/path.js';
 import { iterateByDelimiter } from '../../../../system/string.js';
 import { createDisposable } from '../../../../system/unifiedDisposable.js';
@@ -31,7 +30,7 @@ export class StatusGitSubProvider implements GitStatusSubProvider {
 	) {}
 
 	@gate<StatusGitSubProvider['getStatus']>(rp => rp ?? '')
-	@log()
+	@debug()
 	async getStatus(repoPath: string | undefined, cancellation?: CancellationToken): Promise<GitStatus | undefined> {
 		if (repoPath == null) return undefined;
 
@@ -62,7 +61,7 @@ export class StatusGitSubProvider implements GitStatusSubProvider {
 		return status;
 	}
 
-	@log()
+	@debug()
 	async getStatusForFile(
 		repoPath: string,
 		pathOrUri: string | Uri,
@@ -73,7 +72,7 @@ export class StatusGitSubProvider implements GitStatusSubProvider {
 		return files?.[0];
 	}
 
-	@log()
+	@debug()
 	async getStatusForPath(
 		repoPath: string,
 		pathOrUri: string | Uri,
@@ -120,13 +119,13 @@ export class StatusGitSubProvider implements GitStatusSubProvider {
 	@gate<StatusGitSubProvider['hasWorkingChanges']>(
 		(rp, o) => `${rp ?? ''}:${o?.staged ?? true}:${o?.unstaged ?? true}:${o?.untracked ?? true}`,
 	)
-	@log()
+	@debug()
 	async hasWorkingChanges(
 		repoPath: string,
 		options?: { staged?: boolean; unstaged?: boolean; untracked?: boolean; throwOnError?: boolean },
 		cancellation?: CancellationToken,
 	): Promise<boolean> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		try {
 			const staged = options?.staged ?? true;
@@ -140,11 +139,11 @@ export class StatusGitSubProvider implements GitStatusSubProvider {
 				);
 				if (result.exitCode === 1) {
 					if (staged && unstaged) {
-						setLogScopeExit(scope, ' \u2022 has staged and unstaged changes');
+						scope?.addExitInfo('has staged and unstaged changes');
 					} else if (staged) {
-						setLogScopeExit(scope, ' \u2022 has staged changes');
+						scope?.addExitInfo('has staged changes');
 					} else {
-						setLogScopeExit(scope, ' \u2022 has unstaged changes');
+						scope?.addExitInfo('has unstaged changes');
 					}
 					return true;
 				}
@@ -155,29 +154,29 @@ export class StatusGitSubProvider implements GitStatusSubProvider {
 			if (untracked) {
 				const hasUntracked = await this.hasUntrackedFiles(repoPath, cancellation);
 				if (hasUntracked) {
-					setLogScopeExit(scope, ' \u2022 has untracked files');
+					scope?.addExitInfo('has untracked files');
 					return true;
 				}
 			}
 
-			setLogScopeExit(scope, ' \u2022 no working changes');
+			scope?.addExitInfo('no working changes');
 			return false;
 		} catch (ex) {
 			// Re-throw cancellation errors
 			if (isCancellationError(ex)) throw ex;
 
 			// Log other errors and return false for graceful degradation
-			Logger.error(ex, scope);
-			setLogScopeExit(scope, ' \u2022 error checking for changes');
+			scope?.error(ex);
+			scope?.addExitInfo('error checking for changes');
 			if (options?.throwOnError) throw ex;
 			return false;
 		}
 	}
 
 	@gate<StatusGitSubProvider['getWorkingChangesState']>(rp => rp ?? '')
-	@log()
+	@debug()
 	async getWorkingChangesState(repoPath: string, cancellation?: CancellationToken): Promise<GitWorkingChangesState> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		try {
 			const [stagedResult, unstagedResult, untrackedResult] = await Promise.allSettled([
@@ -200,20 +199,19 @@ export class StatusGitSubProvider implements GitStatusSubProvider {
 				untracked: untrackedResult.status === 'fulfilled' && untrackedResult.value === true,
 			};
 
-			setLogScopeExit(
-				scope,
+			scope?.addExitInfo(
 				result.staged || result.unstaged || result.untracked
-					? ` \u2022 has ${result.staged ? 'staged' : ''}${result.unstaged ? (result.staged ? ', unstaged' : 'unstaged ') : ''}${
+					? `has ${result.staged ? 'staged' : ''}${result.unstaged ? (result.staged ? ', unstaged' : 'unstaged ') : ''}${
 							result.untracked ? (result.staged || result.unstaged ? ', untracked' : 'untracked') : ''
 						} changes`
-					: ' \u2022 no working changes',
+					: 'no working changes',
 			);
 
 			return result;
 		} catch (ex) {
 			if (isCancellationError(ex)) throw ex;
-			Logger.error(ex, scope);
-			setLogScopeExit(scope, ' \u2022 error checking for changes');
+			scope?.error(ex);
+			scope?.addExitInfo('error checking for changes');
 			// Return all false on error for graceful degradation
 			return { staged: false, unstaged: false, untracked: false };
 		}
@@ -239,9 +237,9 @@ export class StatusGitSubProvider implements GitStatusSubProvider {
 	}
 
 	@gate<StatusGitSubProvider['getConflictingFiles']>(rp => rp ?? '')
-	@log()
+	@debug()
 	async getConflictingFiles(repoPath: string, cancellation?: CancellationToken): Promise<GitConflictFile[]> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		try {
 			const result = await this.git.exec(
@@ -252,20 +250,20 @@ export class StatusGitSubProvider implements GitStatusSubProvider {
 			);
 
 			if (!result.stdout) {
-				setLogScopeExit(scope, ' \u2022 no conflicting files');
+				scope?.addExitInfo('no conflicting files');
 				return [];
 			}
 
 			const files = parseGitConflictFiles(result.stdout, repoPath);
-			setLogScopeExit(scope, ` \u2022 ${files.length} conflicting file(s)`);
+			scope?.addExitInfo(`${files.length} conflicting file(s)`);
 			return files;
 		} catch (ex) {
 			// Re-throw cancellation errors
 			if (isCancellationError(ex)) throw ex;
 
 			// Log other errors and return empty array for graceful degradation
-			Logger.error(ex, scope);
-			setLogScopeExit(scope, ' \u2022 error getting conflicting files');
+			scope?.error(ex);
+			scope?.addExitInfo('error getting conflicting files');
 			return [];
 		}
 	}
@@ -297,9 +295,9 @@ export class StatusGitSubProvider implements GitStatusSubProvider {
 	}
 
 	@gate<StatusGitSubProvider['getUntrackedFiles']>(rp => rp ?? '')
-	@log()
+	@debug()
 	async getUntrackedFiles(repoPath: string, cancellation?: CancellationToken): Promise<GitFile[]> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		try {
 			const result = await this.git.exec(
@@ -311,7 +309,7 @@ export class StatusGitSubProvider implements GitStatusSubProvider {
 			);
 
 			if (!result.stdout) {
-				setLogScopeExit(scope, ' \u2022 no untracked files');
+				scope?.addExitInfo('no untracked files');
 				return [];
 			}
 
@@ -323,15 +321,15 @@ export class StatusGitSubProvider implements GitStatusSubProvider {
 				files.push({ path: line, repoPath: repoPath, status: GitFileWorkingTreeStatus.Untracked });
 			}
 
-			setLogScopeExit(scope, ` \u2022 ${files.length} untracked file(s)`);
+			scope?.addExitInfo(`${files.length} untracked file(s)`);
 			return files;
 		} catch (ex) {
 			// Re-throw cancellation errors
 			if (isCancellationError(ex)) throw ex;
 
 			// Log other errors and return empty array for graceful degradation
-			Logger.error(ex, scope);
-			setLogScopeExit(scope, ' \u2022 error getting untracked files');
+			scope?.error(ex);
+			scope?.addExitInfo('error getting untracked files');
 			return [];
 		}
 	}

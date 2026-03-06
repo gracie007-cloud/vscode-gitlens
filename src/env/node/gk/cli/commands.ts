@@ -44,16 +44,21 @@ export class CliCommandHandlers implements Disposable {
 		private readonly server: CliIpcServer,
 	) {
 		for (const { command, handler } of getCommands()) {
-			this.server.registerHandler(command, rq => this.wrapHandler(rq, handler));
+			this.server.registerHandler(command, rq => this.wrapHandler(command, rq, handler));
 		}
 	}
 
 	dispose(): void {}
 
-	private wrapHandler(request: CliCommandRequest | undefined, handler: CliCommandHandler) {
+	private wrapHandler(command: CliCommand, request: CliCommandRequest | undefined, handler: CliCommandHandler) {
 		let repo: Repository | undefined;
 		if (request?.cwd) {
 			repo = this.container.git.getRepository(request.cwd);
+		}
+
+		// Track MCP IPC request usage (only for MCP-specific commands)
+		if (command.startsWith('mcp/')) {
+			void this.container.usage.track('action:gitlens.mcp.ipcRequest:happened');
 		}
 
 		return handler.call(this, request, repo);
@@ -166,7 +171,7 @@ export class CliCommandHandlers implements Disposable {
 			undefined,
 			{
 				repoPath: repo?.path,
-				source: 'gk-cli-integration',
+				source: { source: 'mcp', detail: 'mcp/wip/compose/open' },
 				autoComposeInstructions: instructions,
 			},
 		);
@@ -185,7 +190,7 @@ export class CliCommandHandlers implements Disposable {
 
 			await executeCommand<StartReviewCommandArgs>('gitlens.startReview', {
 				command: 'startReview',
-				source: 'gk-cli-integration',
+				source: { source: 'mcp', detail: 'mcp/pr/review/start' },
 				prUrl: prUrl,
 				instructions: instructions,
 				useDefaults: true,
@@ -221,7 +226,7 @@ export class CliCommandHandlers implements Disposable {
 
 			await executeCommand<StartWorkCommandArgs>('gitlens.startWork', {
 				command: 'startWork',
-				source: 'gk-cli-integration',
+				source: { source: 'mcp', detail: 'mcp/issue/start' },
 				issueUrl: issueUrl,
 				instructions: instructions,
 				useDefaults: true,

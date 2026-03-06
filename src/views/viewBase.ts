@@ -48,13 +48,13 @@ import { configuration } from '../system/-webview/configuration.js';
 import type { StorageChangeEvent } from '../system/-webview/storage.js';
 import { getViewFocusCommand } from '../system/-webview/vscode/views.js';
 import { areEqual } from '../system/array.js';
-import { debug, log } from '../system/decorators/log.js';
+import { debug, trace } from '../system/decorators/log.js';
 import { once } from '../system/event.js';
 import { debounce } from '../system/function/debounce.js';
 import { first } from '../system/iterable.js';
 import type { Lazy } from '../system/lazy.js';
 import { Logger } from '../system/logger.js';
-import { getLogScope } from '../system/logger.scope.js';
+import { getScopedLogger } from '../system/logger.scope.js';
 import { cancellable, defer, isPromise, PromiseCancelledError } from '../system/promise.js';
 import type { BranchesView } from './branchesView.js';
 import type { CommitsView } from './commitsView.js';
@@ -317,12 +317,12 @@ export abstract class ViewBase<
 				if (typeof item.tooltip === 'string') {
 					item.tooltip = `${item.tooltip}\n\n---\ncontext: ${
 						item.contextValue
-					}\nnode: ${node.toString()}\nparent: ${parent?.toString()}\nid: ${node.id}`;
+					}\nnode: ${Logger.toLoggable(node)}\nparent: ${Logger.toLoggable(parent)}\nid: ${node.id}`;
 				} else {
 					item.tooltip.appendMarkdown(
 						`\n\n---\n\ncontext: \`${
 							item.contextValue
-						}\`\\\nnode: \`${node.toString()}\` \\\nparent: \`${parent?.toString()}\` \\\nid: \`${node.id}\``,
+						}\`\\\nnode: \`${Logger.toLoggable(node)}\` \\\nparent: \`${Logger.toLoggable(parent)}\` \\\nid: \`${node.id}\``,
 					);
 				}
 			}
@@ -915,11 +915,11 @@ export abstract class ViewBase<
 		return this.tree?.visible ?? false;
 	}
 
-	@log<ViewBase<Type, RootNode, ViewConfig>['findNode']>({
-		args: {
-			0: '<function>',
-			1: opts => `options=${JSON.stringify({ ...opts, canTraverse: undefined, token: undefined })}`,
-		},
+	@debug({
+		args: (_predicate, options) => ({
+			predicate: '<function>',
+			options: `options=${JSON.stringify({ ...options, canTraverse: undefined, token: undefined })}`,
+		}),
 	})
 	async findNode(
 		predicate: (node: ViewNode) => boolean,
@@ -930,7 +930,7 @@ export abstract class ViewBase<
 			token?: CancellationToken;
 		},
 	): Promise<ViewNode | undefined> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		async function find(this: ViewBase<Type, RootNode, ViewConfig>) {
 			try {
@@ -945,7 +945,7 @@ export abstract class ViewBase<
 
 				return node;
 			} catch (ex) {
-				Logger.error(ex, scope);
+				scope?.error(ex);
 				return undefined;
 			}
 		}
@@ -1045,7 +1045,7 @@ export abstract class ViewBase<
 		return this._expandedNodes.has(node);
 	}
 
-	@debug()
+	@trace()
 	async refresh(reset: boolean = false): Promise<void> {
 		// If we are resetting, make sure to clear any saved node state
 		if (reset) {
@@ -1057,7 +1057,7 @@ export abstract class ViewBase<
 		this.triggerNodeChange();
 	}
 
-	@debug<ViewBase<Type, RootNode, ViewConfig>['refreshNode']>({ args: { 0: n => n.toString() } })
+	@trace()
 	async refreshNode(node: ViewNode, reset: boolean = false, force: boolean = false): Promise<void> {
 		const result = await node.refresh?.(reset);
 		if (!force && result?.cancel === true) return;
@@ -1065,7 +1065,7 @@ export abstract class ViewBase<
 		this.triggerNodeChange(node);
 	}
 
-	@log<ViewBase<Type, RootNode, ViewConfig>['reveal']>({ args: { 0: n => n.toString() } })
+	@debug()
 	async reveal(node: ViewNode, options?: RevealOptions): Promise<void> {
 		if (this.initialized.pending) {
 			await this.initialized.promise;
@@ -1076,11 +1076,8 @@ export abstract class ViewBase<
 
 	async revealDeep(node: ViewNode, options?: RevealOptions): Promise<void>;
 	async revealDeep(node: ViewNode, parents: ViewNode[], options?: RevealOptions): Promise<void>;
-	@log<ViewBase<Type, RootNode, ViewConfig>['revealDeep']>({
-		args: {
-			0: n => n.toString(),
-			1: false,
-		},
+	@debug({
+		args: (node, _parents, options) => ({ node: node, options: options }),
 	})
 	async revealDeep(
 		node: ViewNode,
@@ -1116,7 +1113,7 @@ export abstract class ViewBase<
 	private async revealCore(node: ViewNode, root: ViewNode | undefined, options?: RevealOptions): Promise<void> {
 		if (this.tree == null) return;
 
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		try {
 			await this.waitUntilLoaded('revealCore');
@@ -1125,15 +1122,15 @@ export abstract class ViewBase<
 			await this.tree?.reveal(node, options);
 		} catch (ex) {
 			if (!node.id || root == null) {
-				Logger.error(ex, scope);
+				scope?.error(ex);
 				debugger;
 			}
 		}
 	}
 
-	@log()
+	@debug()
 	async show(options?: { preserveFocus?: boolean }): Promise<void> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		try {
 			const command = getViewFocusCommand(this.grouped ? 'gitlens.views.scm.grouped' : this.id);
@@ -1145,18 +1142,16 @@ export abstract class ViewBase<
 
 			void (await executeCoreCommand(command, options));
 		} catch (ex) {
-			Logger.error(ex, scope);
+			scope?.error(ex);
 		}
 	}
 
-	// @debug({ args: { 0: (n: ViewNode) => n.toString() }, singleLine: true })
+	// @debug({ args: { 0: (n: ViewNode) => n.toString() }, onlyExit: true })
 	getNodeLastKnownLimit(node: PageableViewNode): number | undefined {
 		return this._lastKnownLimits.get(node.id);
 	}
 
-	@debug<ViewBase<Type, RootNode, ViewConfig>['loadMoreNodeChildren']>({
-		args: { 0: n => n.toString(), 2: n => n?.toString() },
-	})
+	@trace()
 	async loadMoreNodeChildren(
 		node: ViewNode & PageableViewNode,
 		limit: number | { until: string | undefined } | undefined,
@@ -1171,10 +1166,7 @@ export abstract class ViewBase<
 		this._lastKnownLimits.set(node.id, node.limit);
 	}
 
-	@debug<ViewBase<Type, RootNode, ViewConfig>['resetNodeLastKnownLimit']>({
-		args: { 0: n => n.toString() },
-		singleLine: true,
-	})
+	@trace({ onlyExit: true })
 	resetNodeLastKnownLimit(node: PageableViewNode): void {
 		this._lastKnownLimits.delete(node.id);
 	}
@@ -1182,7 +1174,7 @@ export abstract class ViewBase<
 	private _pendingNodeChanges = new Set<ViewNode | undefined>();
 	private _processingNodeChanges = false;
 
-	@debug<ViewBase<Type, RootNode, ViewConfig>['triggerNodeChange']>({ args: { 0: n => n?.toString() } })
+	@trace()
 	triggerNodeChange(node?: ViewNode): void {
 		// Since the root node won't actually refresh, force everything
 		const target = node != null && node !== this.root ? node : undefined;
@@ -1375,14 +1367,10 @@ export class ViewNodeState implements Disposable {
 	storeState<T>(id: string, key: string, value: T, sticky?: boolean): void {
 		let store;
 		if (sticky) {
-			if (this._stickyStore == null) {
-				this._stickyStore = new Map();
-			}
+			this._stickyStore ??= new Map();
 			store = this._stickyStore;
 		} else {
-			if (this._store == null) {
-				this._store = new Map();
-			}
+			this._store ??= new Map();
 			store = this._store;
 		}
 

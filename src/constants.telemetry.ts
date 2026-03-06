@@ -192,6 +192,11 @@ export interface TelemetryEvents extends WebviewShowAbortedEvents, WebviewShownE
 	/** Sent when the user is warned that the index has changed in the Commit Composer */
 	'composer/warning/indexChanged': ComposerEvent;
 
+	/** Sent when a conflict-prone git command (merge, rebase, cherry-pick, revert, stash apply/pop) is run */
+	'gitCommand/run': GitCommandRunEvent;
+	/** Sent when a conflict occurs while running a conflict-prone git command */
+	'gitCommand/conflict': GitCommandConflictEvent;
+
 	/** Sent when the Commit Graph is shown */
 	'graph/shown': GraphShownEvent;
 	/** Sent when a Commit Graph command is executed */
@@ -493,6 +498,18 @@ interface AIEventDataSendBase extends AIEventDataBase {
 	'config.largePromptThreshold'?: number;
 	'config.usedCustomInstructions'?: boolean;
 
+	'diff.files.count'?: number;
+	'diff.hunks.count'?: number;
+	'diff.lines.count'?: number;
+	'diff.hash'?: string;
+
+	'customInstructions.used'?: boolean;
+	'customInstructions.length'?: number;
+	'customInstructions.setting.used'?: boolean;
+	'customInstructions.setting.length'?: number;
+	'customInstructions.commitMessage.setting.used'?: boolean;
+	'customInstructions.commitMessage.setting.length'?: number;
+
 	'warning.exceededLargePromptThreshold'?: boolean;
 	'warning.promptTruncated'?: boolean;
 
@@ -773,6 +790,16 @@ export type FeaturePreviewActionEventData = {
 	action: `start-preview-trial:${FeaturePreviews}`;
 } & FeaturePreviewEventData;
 
+type GitCommandType = 'merge' | 'rebase' | 'cherry-pick' | 'revert' | 'stash-apply' | 'stash-pop';
+
+interface GitCommandRunEvent {
+	command: GitCommandType;
+}
+
+interface GitCommandConflictEvent {
+	command: GitCommandType;
+}
+
 type GraphContextEventData = WebviewTelemetryContext & Partial<RepositoryContext>;
 export type GraphTelemetryContext = GraphContextEventData;
 
@@ -887,6 +914,7 @@ type ComposerContextDiffData = {
 	'context.diff.files.count': number;
 	'context.diff.hunks.count': number;
 	'context.diff.lines.count': number;
+	'context.diff.hash': string;
 	'context.diff.staged.exists': boolean;
 	'context.diff.unstaged.exists': boolean;
 	'context.diff.unstaged.included': boolean;
@@ -1264,6 +1292,7 @@ type RepositoryContributorsDistributionEventData = {
 
 interface RepositoryOpenedEvent extends RepositoryEventData, RepositoryContributorsDistributionEventData {
 	'repository.remoteProviders': string;
+	'repository.submodules.openedCount': number;
 	'repository.worktrees.openedCount': number;
 	'repository.contributors.commits.count': number | undefined;
 	'repository.contributors.commits.avgPerContributor': number | undefined;
@@ -1469,13 +1498,24 @@ interface WalkthroughCompletionEvent {
 	'context.key': WalkthroughContextKeys;
 }
 
-type WelcomeActionNames = 'plus/sign-up' | 'dismiss' | 'shown';
+type WelcomeActionNames =
+	| 'dismiss'
+	| 'open/composer'
+	| 'open/graph'
+	| 'open/home-view'
+	| 'open/help-center'
+	| 'open/help-center/community-vs-pro'
+	| 'open/launchpad'
+	| 'plus/login'
+	| 'plus/reactivate'
+	| 'plus/sign-up'
+	| 'plus/upgrade'
+	| 'shown';
 
-type WelcomeActionEvent = {
-	name: WelcomeActionNames;
-	viewedCarouselPages?: number;
-	proButtonClicked?: boolean;
-};
+type WelcomeActionEvent =
+	| { name: 'shown' | 'dismiss'; viewedCarouselPages?: number; proButtonClicked?: boolean }
+	| { type: 'command'; name: WelcomeActionNames; command: string }
+	| { type: 'url'; name: WelcomeActionNames; url: string };
 
 type WebviewContextEventData = {
 	'context.webview.id': string;
@@ -1588,7 +1628,11 @@ export type TrackedUsage = {
 /**
  * Actions that happen without a command
  */
-export type TrackedGlActions = `gitlens.ai.generateCommits`;
+export type TrackedGlActions =
+	| 'gitlens.ai.generateCommits'
+	| 'gitlens.mcp.ipcRequest'
+	| 'gitlens.mcp.chatInteraction'
+	| 'gitlens.mcp.bundledMcpDefinitionProvided';
 
 export type TrackedUsageFeatures =
 	| `${WebviewPanelTypes}Webview`

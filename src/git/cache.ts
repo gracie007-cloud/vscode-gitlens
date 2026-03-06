@@ -2,12 +2,11 @@ import type { Uri } from 'vscode';
 import { Disposable } from 'vscode';
 import type { Container } from '../container.js';
 import { configuration } from '../system/-webview/configuration.js';
-import { log } from '../system/decorators/log.js';
+import { debug } from '../system/decorators/log.js';
 import { invalidateMemoized } from '../system/decorators/memoize.js';
 import type { PromiseOrValue } from '../system/promise.js';
 import type { RepoPromiseMap } from '../system/promiseCache.js';
 import { CacheController, PromiseCache, PromiseMap, RepoPromiseCacheMap } from '../system/promiseCache.js';
-import { PathTrie } from '../system/trie.js';
 import type { GitResult } from './execTypes.js';
 import type { GitIgnoreCache } from './gitIgnoreCache.js';
 import type {
@@ -25,7 +24,6 @@ import type { GitPausedOperationStatus } from './models/pausedOperationStatus.js
 import type { GitBranchReference } from './models/reference.js';
 import type { GitRemote } from './models/remote.js';
 import type { RepositoryChangeEvent } from './models/repository.js';
-import { RepositoryChange, RepositoryChangeComparisonMode } from './models/repository.js';
 import type { GitStash } from './models/stash.js';
 import type { GitTag } from './models/tag.js';
 import type { GitUser } from './models/user.js';
@@ -43,6 +41,7 @@ interface Caches {
 	bestRemotes: PromiseMap<RepoPath, GitRemote<RemoteProvider>[]> | undefined;
 	branch: PromiseMap<RepoPath, GitBranch | undefined> | undefined;
 	branches: PromiseMap<RepoPath, PagedResult<GitBranch>> | undefined;
+	fileExistence: RepoPromiseCacheMap<string, boolean> | undefined;
 	configKeys: RepoPromiseCacheMap<string, string | undefined> | undefined;
 	configPatterns: RepoPromiseCacheMap<string, Map<string, string>> | undefined;
 	conflictDetection: RepoPromiseCacheMap<ConflictDetectionCacheKey, ConflictDetectionResult> | undefined;
@@ -66,6 +65,7 @@ interface Caches {
 	sharedBranches: PromiseMap<RepoPath, PagedResult<GitBranch>> | undefined;
 	stashes: PromiseMap<RepoPath, GitStash> | undefined;
 	tags: PromiseMap<RepoPath, PagedResult<GitTag>> | undefined;
+	trackedPaths: RepoPromiseCacheMap<string, [string, string] | false> | undefined;
 	worktrees: PromiseMap<RepoPath, GitWorktree[]> | undefined;
 }
 
@@ -74,6 +74,7 @@ function createEmptyCaches(): Caches {
 		bestRemotes: undefined,
 		branch: undefined,
 		branches: undefined,
+		fileExistence: undefined,
 		configKeys: undefined,
 		configPatterns: undefined,
 		conflictDetection: undefined,
@@ -97,6 +98,7 @@ function createEmptyCaches(): Caches {
 		sharedBranches: undefined,
 		stashes: undefined,
 		tags: undefined,
+		trackedPaths: undefined,
 		worktrees: undefined,
 	};
 }
@@ -282,16 +284,27 @@ export class GitCache implements Disposable {
 		return (this._caches.tags ??= new PromiseMap<RepoPath, PagedResult<GitTag>>());
 	}
 
-	private _trackedPaths = new PathTrie<PromiseOrValue<[string, string] | undefined>>();
-	get trackedPaths(): PathTrie<PromiseOrValue<[string, string] | undefined>> {
-		return this._trackedPaths;
+	get fileExistence(): RepoPromiseCacheMap<string, boolean> {
+		return (this._caches.fileExistence ??= new RepoPromiseCacheMap<string, boolean>({
+			createTTL: 1000 * 10, // 10 seconds
+			capacity: 100,
+			expireOnError: true,
+		}));
+	}
+
+	get trackedPaths(): RepoPromiseCacheMap<string, [string, string] | false> {
+		return (this._caches.trackedPaths ??= new RepoPromiseCacheMap<string, [string, string] | false>({
+			createTTL: 1000 * 60, // 60 seconds
+			accessTTL: 1000 * 30, // 30 seconds idle
+			capacity: 200,
+		}));
 	}
 
 	get worktrees(): PromiseMap<RepoPath, GitWorktree[]> {
 		return (this._caches.worktrees ??= new PromiseMap<RepoPath, GitWorktree[]>());
 	}
 
-	@log({ singleLine: true })
+	@debug({ onlyExit: true })
 	clearCaches(repoPath: string | undefined, ...types: CachedGitTypes[]): void {
 		type CacheType =
 			| Map<string, unknown>
@@ -299,7 +312,6 @@ export class GitCache implements Disposable {
 			| PromiseMap<string, unknown>
 			| RepoPromiseCacheMap<unknown, unknown>
 			| RepoPromiseMap<unknown, unknown>
-			| PathTrie<unknown>
 			| undefined;
 
 		const cachesToClear = new Set<CacheType>();
@@ -381,10 +393,11 @@ export class GitCache implements Disposable {
 
 		if (!types.length) {
 			cachesToClear.add(this._caches.currentUser);
+			cachesToClear.add(this._caches.fileExistence);
 			cachesToClear.add(this._caches.gitDir);
 			cachesToClear.add(this._caches.gitIgnore);
 			sharedCachesToClear.add(this._caches.gitResults);
-			cachesToClear.add(this._trackedPaths);
+			cachesToClear.add(this._caches.trackedPaths);
 		}
 
 		// Clear per-worktree caches
@@ -442,48 +455,48 @@ export class GitCache implements Disposable {
 		this._commonPathRegistry.set(repoPath, commonPath);
 	}
 
-	@log({ singleLine: true })
+	@debug({ onlyExit: true })
 	reset(): void {
 		this._commonPathRegistry.clear();
 
 		// Clear all caches and reset to empty state
 		this._caches = createEmptyCaches();
-		this._trackedPaths.clear();
 	}
 
 	/**
 	 * Handles repository change events by invalidating appropriate caches.
 	 * Encapsulates all cache invalidation logic for repository changes.
 	 */
-	@log({ singleLine: true })
+	@debug({ onlyExit: true })
 	onRepositoryChanged(repoPath: string, e: RepositoryChangeEvent): void {
-		if (e.changed(RepositoryChange.Unknown, RepositoryChange.Closed, RepositoryChangeComparisonMode.Any)) {
+		if (e.changed('unknown', 'closed')) {
 			this.clearCaches(repoPath);
 			return;
 		}
 
 		const types = new Set<CachedGitTypes>();
 
-		if (e.changed(RepositoryChange.Head, RepositoryChangeComparisonMode.Any)) {
+		if (e.changed('head')) {
 			this.currentBranchReference.delete(repoPath);
 		}
 
-		if (e.changed(RepositoryChange.Index, RepositoryChangeComparisonMode.Any)) {
-			this.trackedPaths.clear();
+		if (e.changed('index')) {
+			this._caches.fileExistence?.delete(repoPath);
+			this._caches.trackedPaths?.delete(repoPath);
 		}
 
-		if (e.changed(RepositoryChange.Config, RepositoryChangeComparisonMode.Any)) {
+		if (e.changed('config')) {
 			types.add('config');
 		}
 
-		if (e.changed(RepositoryChange.Heads, RepositoryChangeComparisonMode.Any)) {
+		if (e.changed('heads')) {
 			// Clear branches cache (includes sharedBranches, logShas, reachability, gitResults, etc.)
 			types.add('branches');
 			types.add('contributors');
 			types.add('worktrees');
 		}
 
-		if (e.changed(RepositoryChange.Remotes, RepositoryChangeComparisonMode.Any)) {
+		if (e.changed('remotes')) {
 			// Clear branches cache for upstream tracking state (ahead/behind counts) that changes on push
 			types.add('branches');
 			types.add('contributors');
@@ -491,42 +504,33 @@ export class GitCache implements Disposable {
 			types.add('worktrees');
 		}
 
-		if (e.changed(RepositoryChange.Ignores, RepositoryChangeComparisonMode.Any)) {
+		if (e.changed('ignores')) {
 			types.add('gitignore');
 		}
 
-		if (e.changed(RepositoryChange.GkConfig, RepositoryChangeComparisonMode.Any)) {
+		if (e.changed('gkConfig')) {
 			types.add('gkConfig');
 		}
 
-		if (e.changed(RepositoryChange.RemoteProviders, RepositoryChangeComparisonMode.Any)) {
+		if (e.changed('remoteProviders')) {
 			// RemoteProviders change only affects parsed remotes, not raw git output
 			types.add('providers');
 		}
 
-		if (
-			e.changed(
-				RepositoryChange.CherryPick,
-				RepositoryChange.Merge,
-				RepositoryChange.Rebase,
-				RepositoryChange.Revert,
-				RepositoryChange.PausedOperationStatus,
-				RepositoryChangeComparisonMode.Any,
-			)
-		) {
+		if (e.changed('cherryPick', 'merge', 'rebase', 'revert', 'pausedOp')) {
 			this.branch.delete(repoPath);
 			types.add('status');
 		}
 
-		if (e.changed(RepositoryChange.Stash, RepositoryChangeComparisonMode.Any)) {
+		if (e.changed('stash')) {
 			types.add('stashes');
 		}
 
-		if (e.changed(RepositoryChange.Tags, RepositoryChangeComparisonMode.Any)) {
+		if (e.changed('tags')) {
 			types.add('tags');
 		}
 
-		if (e.changed(RepositoryChange.Worktrees, RepositoryChangeComparisonMode.Any)) {
+		if (e.changed('worktrees')) {
 			types.add('worktrees');
 		}
 
@@ -766,7 +770,7 @@ export class GitCache implements Disposable {
 		return this.getSharedOrCreate(this.stashes, repoPath, factory, (data, newRepoPath) => ({
 			repoPath: newRepoPath,
 			stashes: new Map(
-				[...data.stashes.entries()].map(([sha, s]) => [sha, s.withRepoPath<GitStashCommit>(newRepoPath)]),
+				Array.from(data.stashes.entries(), ([sha, s]) => [sha, s.withRepoPath<GitStashCommit>(newRepoPath)]),
 			),
 		}));
 	}

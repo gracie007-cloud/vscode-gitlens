@@ -51,10 +51,9 @@ import { isRevisionRange, isSha, isUncommitted, isUncommittedStaged } from '../.
 import { isUserMatch } from '../../../../git/utils/user.utils.js';
 import { configuration } from '../../../../system/-webview/configuration.js';
 import { splitPath } from '../../../../system/-webview/path.js';
-import { debug, log } from '../../../../system/decorators/log.js';
+import { debug, trace } from '../../../../system/decorators/log.js';
 import { filterMap, findLast, first, join, last, some } from '../../../../system/iterable.js';
-import { Logger } from '../../../../system/logger.js';
-import { getLogScope } from '../../../../system/logger.scope.js';
+import { getScopedLogger } from '../../../../system/logger.scope.js';
 import { isFolderGlob, stripFolderGlob } from '../../../../system/path.js';
 import type { CacheController } from '../../../../system/promiseCache.js';
 import { maybeStopWatch } from '../../../../system/stopwatch.js';
@@ -62,7 +61,7 @@ import { createDisposable } from '../../../../system/unifiedDisposable.js';
 import type { CachedLog, TrackedGitDocument } from '../../../../trackers/trackedDocument.js';
 import { GitDocumentState } from '../../../../trackers/trackedDocument.js';
 import type { Git } from '../git.js';
-import { gitConfigsLog, gitConfigsLogWithFiles } from '../git.js';
+import { gitConfigsLog, gitConfigsLogWithFiles, GitErrors } from '../git.js';
 import type { LocalGitProviderInternal } from '../localGitProvider.js';
 import { convertStashesToStdin } from './stash.js';
 
@@ -77,7 +76,7 @@ export class CommitsGitSubProvider implements GitCommitsSubProvider {
 		private readonly provider: LocalGitProviderInternal,
 	) {}
 
-	@log()
+	@debug()
 	async createUnreachableCommitFromTree(
 		repoPath: string,
 		tree: string,
@@ -97,7 +96,7 @@ export class CommitsGitSubProvider implements GitCommitsSubProvider {
 		return result.stdout.trim();
 	}
 
-	@log()
+	@debug()
 	async getCommit(repoPath: string, rev: string, cancellation?: CancellationToken): Promise<GitCommit | undefined> {
 		if (isUncommitted(rev, true)) {
 			return createUncommittedChangesCommit(
@@ -115,7 +114,7 @@ export class CommitsGitSubProvider implements GitCommitsSubProvider {
 		return log.commits.get(rev) ?? first(log.commits.values());
 	}
 
-	@log({ exit: true })
+	@debug({ exit: true })
 	async getCommitCount(repoPath: string, rev: string, cancellation?: CancellationToken): Promise<number | undefined> {
 		const result = await this.git.exec(
 			{ cwd: repoPath, cancellation: cancellation, errors: 'ignore' },
@@ -133,7 +132,7 @@ export class CommitsGitSubProvider implements GitCommitsSubProvider {
 		return isNaN(count) ? undefined : count;
 	}
 
-	@log()
+	@debug()
 	async getCommitFiles(repoPath: string, rev: string, cancellation?: CancellationToken): Promise<GitFileChange[]> {
 		const parser = getShaAndFilesAndStatsLogParser();
 		const result = await this.git.exec(
@@ -155,13 +154,17 @@ export class CommitsGitSubProvider implements GitCommitsSubProvider {
 					f.originalPath,
 					undefined,
 					{ additions: f.additions, deletions: f.deletions, changes: 0 },
+					undefined,
+					undefined,
+					f.mode,
+					f.oid ? { oid: f.oid, previousOid: f.previousOid } : undefined,
 				),
 		);
 
 		return files ?? [];
 	}
 
-	@log()
+	@debug()
 	async getCommitForFile(
 		repoPath: string | undefined,
 		uri: Uri,
@@ -169,7 +172,7 @@ export class CommitsGitSubProvider implements GitCommitsSubProvider {
 		options?: { firstIfNotFound?: boolean },
 		cancellation?: CancellationToken,
 	): Promise<GitCommit | undefined> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		const [relativePath, root] = splitPath(uri, repoPath);
 
@@ -179,7 +182,7 @@ export class CommitsGitSubProvider implements GitCommitsSubProvider {
 
 			let commit;
 			if (rev) {
-				const commit = log.commits.get(rev);
+				commit = log.commits.get(rev);
 				if (commit == null && !options?.firstIfNotFound) {
 					// If the ref isn't a valid sha we will never find it, so let it fall through so we return the first
 					if (isSha(rev) || isUncommitted(rev)) return undefined;
@@ -188,14 +191,14 @@ export class CommitsGitSubProvider implements GitCommitsSubProvider {
 
 			return commit ?? first(log.commits.values());
 		} catch (ex) {
-			Logger.error(ex, scope);
+			scope?.error(ex);
 			if (isCancellationError(ex)) throw ex;
 
 			return undefined;
 		}
 	}
 
-	@log()
+	@debug()
 	async getCommitReachability(
 		repoPath: string,
 		rev: string,
@@ -203,7 +206,7 @@ export class CommitsGitSubProvider implements GitCommitsSubProvider {
 	): Promise<GitCommitReachability | undefined> {
 		if (repoPath == null || isUncommitted(rev)) return undefined;
 
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		const getCore = async (cacheable?: CacheController) => {
 			try {
@@ -268,7 +271,7 @@ export class CommitsGitSubProvider implements GitCommitsSubProvider {
 				debugger;
 				if (isCancellationError(ex)) throw ex;
 
-				Logger.error(ex, scope);
+				scope?.error(ex);
 
 				return undefined;
 			}
@@ -277,13 +280,13 @@ export class CommitsGitSubProvider implements GitCommitsSubProvider {
 		return this.cache.reachability.getOrCreate(repoPath, rev, getCore);
 	}
 
-	@log()
+	@debug()
 	async getIncomingActivity(
 		repoPath: string,
 		options?: IncomingActivityOptions,
 		cancellation?: CancellationToken,
 	): Promise<GitReflog | undefined> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		const args = ['--walk-reflogs', `--format=${parseGitRefLogDefaultFormat}`, '--date=iso8601'];
 
@@ -320,7 +323,7 @@ export class CommitsGitSubProvider implements GitCommitsSubProvider {
 
 			return reflog;
 		} catch (ex) {
-			Logger.error(ex, scope);
+			scope?.error(ex);
 			if (isCancellationError(ex)) throw ex;
 
 			return undefined;
@@ -360,7 +363,7 @@ export class CommitsGitSubProvider implements GitCommitsSubProvider {
 		};
 	}
 
-	@log({ exit: true })
+	@debug({ exit: true })
 	async getInitialCommitSha(repoPath: string, cancellation?: CancellationToken): Promise<string | undefined> {
 		// Initial commit SHA is shared across all worktrees
 		return this.cache.getInitialCommitSha(repoPath, async commonPath => {
@@ -383,7 +386,7 @@ export class CommitsGitSubProvider implements GitCommitsSubProvider {
 		});
 	}
 
-	@log()
+	@debug()
 	async getLeftRightCommitCount(
 		repoPath: string,
 		range: GitRevisionRange,
@@ -419,7 +422,7 @@ export class CommitsGitSubProvider implements GitCommitsSubProvider {
 		return counts;
 	}
 
-	@log()
+	@debug()
 	async getLog(
 		repoPath: string,
 		rev?: string | undefined,
@@ -429,7 +432,7 @@ export class CommitsGitSubProvider implements GitCommitsSubProvider {
 		return this.getLogCore(repoPath, rev, options, cancellation);
 	}
 
-	@debug({ args: { 2: false, 3: false, 4: false }, exit: true })
+	@trace({ args: (repoPath, rev) => ({ repoPath: repoPath, rev: rev }), exit: true })
 	private async getLogCore(
 		repoPath: string,
 		rev?: string | undefined,
@@ -439,7 +442,7 @@ export class CommitsGitSubProvider implements GitCommitsSubProvider {
 		cancellation?: CancellationToken,
 		additionalArgs?: string[],
 	): Promise<GitLog | undefined> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		try {
 			const currentUserPromise = this.provider.config.getCurrentUser(repoPath);
@@ -629,8 +632,25 @@ export class CommitsGitSubProvider implements GitCommitsSubProvider {
 
 			return log;
 		} catch (ex) {
-			Logger.error(ex, scope);
 			if (isCancellationError(ex)) throw ex;
+
+			// Check if this is a "bad object" error due to a submodule's internal SHA
+			const pathspec = options?.path?.pathspec;
+			if (rev && pathspec && ex instanceof Error && GitErrors.badObject.test(ex.message)) {
+				const tree = await this.provider.revision.getTreeEntryForRevision(repoPath, 'HEAD', pathspec);
+				if (tree?.type === 'commit') {
+					// It's a submodule - retry without the rev and without rename tracking
+					return this.getLogCore(
+						repoPath,
+						undefined,
+						{ ...options, path: { ...options.path, pathspec: pathspec, renames: false } },
+						cancellation,
+						additionalArgs,
+					);
+				}
+			}
+
+			scope?.error(ex);
 			debugger;
 
 			return undefined;
@@ -750,7 +770,7 @@ export class CommitsGitSubProvider implements GitCommitsSubProvider {
 		};
 	}
 
-	@log()
+	@debug()
 	async getLogForPath(
 		repoPath: string | undefined,
 		pathOrUri: string | Uri,
@@ -760,7 +780,7 @@ export class CommitsGitSubProvider implements GitCommitsSubProvider {
 	): Promise<GitLog | undefined> {
 		if (repoPath == null) return undefined;
 
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		let relativePath = this.provider.getRelativePath(pathOrUri, repoPath);
 
@@ -780,20 +800,32 @@ export class CommitsGitSubProvider implements GitCommitsSubProvider {
 			renames: options?.renames ?? configuration.get('advanced.fileHistoryFollowsRenames'),
 		};
 
+		let type: 'file' | 'folder' | 'submodule' = options.isFolder ? 'folder' : 'file';
 		if (isFolderGlob(relativePath)) {
 			relativePath = stripFolderGlob(relativePath);
 			options.isFolder = true;
+			type = 'folder';
 		} else if (options.isFolder == null) {
 			const tree = await this.provider.revision.getTreeEntryForRevision(repoPath, rev || 'HEAD', relativePath);
 			if (cancellation?.isCancellationRequested) throw new CancellationError();
 
-			options.isFolder = tree?.type === 'tree';
+			if (tree?.type === 'commit') {
+				// It's a submodule — line ranges and rename tracking don't apply, and the rev may reference
+				// the submodule's internal SHA which isn't valid in the parent repo
+				type = 'submodule';
+				options.range = undefined;
+				options.renames = false;
+				// rev = undefined;
+			} else {
+				type = tree?.type === 'tree' ? 'folder' : 'file';
+				options.isFolder = type === 'folder';
+			}
 		}
 
 		let cacheKey: string | undefined;
 		if (
-			// Don't cache folders
-			!options.isFolder &&
+			// Only cache files
+			type === 'file' &&
 			options.authors == null &&
 			options.cursor == null &&
 			options.filters == null &&
@@ -828,7 +860,7 @@ export class CommitsGitSubProvider implements GitCommitsSubProvider {
 			if (doc.state != null) {
 				const cachedLog = doc.state.getLog(cacheKey);
 				if (cachedLog != null) {
-					Logger.debug(scope, `Cache hit: '${cacheKey}'`);
+					scope?.trace(`Cache hit: '${cacheKey}'`);
 					return cachedLog.item;
 				}
 
@@ -837,14 +869,14 @@ export class CommitsGitSubProvider implements GitCommitsSubProvider {
 					const cachedLog = doc.state.getLog(`log${options.renames ? ':follow' : ''}`);
 					if (cachedLog != null) {
 						if (rev == null) {
-							Logger.debug(scope, `Cache hit: ~'${cacheKey}'`);
+							scope?.trace(`Cache hit: ~'${cacheKey}'`);
 							return cachedLog.item;
 						}
 
-						Logger.debug(scope, `Cache ?: '${cacheKey}'`);
+						scope?.trace(`Cache ?: '${cacheKey}'`);
 						let log = await cachedLog.item;
 						if (log != null && !log.hasMore && log.commits.has(rev)) {
-							Logger.debug(scope, `Cache hit: '${cacheKey}'`);
+							scope?.trace(`Cache hit: '${cacheKey}'`);
 
 							// Create a copy of the log starting at the requested commit
 							let skip = true;
@@ -884,7 +916,7 @@ export class CommitsGitSubProvider implements GitCommitsSubProvider {
 				}
 			}
 
-			Logger.debug(scope, `Cache miss: '${cacheKey}'`);
+			scope?.trace(`Cache miss: '${cacheKey}'`);
 
 			doc.state ??= new GitDocumentState();
 		}
@@ -899,7 +931,7 @@ export class CommitsGitSubProvider implements GitCommitsSubProvider {
 					}
 
 					const msg: string = ex?.toString() ?? '';
-					Logger.debug(scope, `Cache replace (with empty promise): '${cacheKey}'`);
+					scope?.trace(`Cache replace (with empty promise): '${cacheKey}'`);
 
 					const value: CachedLog = {
 						item: emptyPromise as Promise<GitLog>,
@@ -917,7 +949,7 @@ export class CommitsGitSubProvider implements GitCommitsSubProvider {
 		);
 
 		if (cacheKey && doc?.state != null) {
-			Logger.debug(scope, `Cache add: '${cacheKey}'`);
+			scope?.trace(`Cache add: '${cacheKey}'`);
 
 			const value: CachedLog = {
 				item: promise as Promise<GitLog>,
@@ -935,13 +967,13 @@ export class CommitsGitSubProvider implements GitCommitsSubProvider {
 		options: GitLogForPathOptions,
 		cancellation?: CancellationToken,
 	): Promise<GitLog | undefined> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		const paths = await this.provider.isTrackedWithDetails(path, repoPath, rev);
 		if (cancellation?.isCancellationRequested) throw new CancellationError();
 
 		if (paths == null) {
-			Logger.log(scope, `Skipping log; '${path}' is not tracked`);
+			scope?.debug(`Skipping log; '${path}' is not tracked`);
 			return emptyPromise as Promise<GitLog>;
 		}
 
@@ -972,14 +1004,14 @@ export class CommitsGitSubProvider implements GitCommitsSubProvider {
 		return log;
 	}
 
-	@log()
+	@debug()
 	async getLogShas(
 		repoPath: string,
 		rev?: string | undefined,
 		options?: GitLogShasOptions,
 		cancellation?: CancellationToken,
 	): Promise<Iterable<string>> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		options ??= {};
 		options.ordering ??= configuration.get('advanced.commitOrdering');
@@ -1048,7 +1080,7 @@ export class CommitsGitSubProvider implements GitCommitsSubProvider {
 				);
 				return [...parser.parse(result.stdout)];
 			} catch (ex) {
-				Logger.error(ex, scope);
+				scope?.error(ex);
 				if (isCancellationError(ex)) throw ex;
 				debugger;
 
@@ -1070,13 +1102,13 @@ export class CommitsGitSubProvider implements GitCommitsSubProvider {
 		return getCore();
 	}
 
-	@log()
+	@debug()
 	async getOldestUnpushedShaForPath(
 		repoPath: string,
 		pathOrUri: string | Uri,
 		cancellation?: CancellationToken,
 	): Promise<string | undefined> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		try {
 			const relativePath = this.provider.getRelativePath(pathOrUri, repoPath);
@@ -1101,7 +1133,7 @@ export class CommitsGitSubProvider implements GitCommitsSubProvider {
 			);
 			return first(parser.parse(result.stdout));
 		} catch (ex) {
-			Logger.error(ex, scope);
+			scope?.error(ex);
 			if (isCancellationError(ex)) throw ex;
 			debugger;
 
@@ -1109,14 +1141,14 @@ export class CommitsGitSubProvider implements GitCommitsSubProvider {
 		}
 	}
 
-	@log()
+	@debug()
 	async hasCommitBeenPushed(repoPath: string, rev: string, cancellation?: CancellationToken): Promise<boolean> {
 		if (repoPath == null) return false;
 
 		return this.isAncestorOf(repoPath, rev, '@{u}', cancellation);
 	}
 
-	@log()
+	@debug()
 	async isAncestorOf(
 		repoPath: string,
 		rev1: string,
@@ -1135,13 +1167,13 @@ export class CommitsGitSubProvider implements GitCommitsSubProvider {
 		return result.exitCode === 0;
 	}
 
-	@log<CommitsGitSubProvider['searchCommits']>({
-		args: {
-			1: s =>
-				`[${s.matchAll ? 'A' : ''}${s.matchCase ? 'C' : ''}${s.matchRegex ? 'R' : ''}${
-					s.matchWholeWord ? 'W' : ''
-				}]: ${s.query.length > 500 ? `${s.query.substring(0, 500)}...` : s.query}`,
-		},
+	@debug({
+		args: (repoPath, s) => ({
+			repoPath: repoPath,
+			search: `[${s.matchAll ? 'A' : ''}${s.matchCase ? 'C' : ''}${s.matchRegex ? 'R' : ''}${
+				s.matchWholeWord ? 'W' : ''
+			}]: ${s.query.length > 500 ? `${s.query.substring(0, 500)}...` : s.query}`,
+		}),
 	})
 	async searchCommits(
 		repoPath: string,
@@ -1150,7 +1182,7 @@ export class CommitsGitSubProvider implements GitCommitsSubProvider {
 		options?: GitSearchCommitsOptions,
 		cancellation?: CancellationToken,
 	): Promise<SearchCommitsResult> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		search = { matchAll: false, matchCase: false, matchRegex: true, matchWholeWord: false, ...search };
 		if (
@@ -1296,16 +1328,16 @@ export class CommitsGitSubProvider implements GitCommitsSubProvider {
 
 			return { search: search, log: log };
 		} catch (ex) {
-			Logger.error(ex, scope);
+			scope?.error(ex);
 			if (isCancellationError(ex)) throw ex;
 
 			return { search: search, log: undefined };
 		}
 	}
 
-	@log()
+	@debug()
 	async getCommitSignature(repoPath: string, sha: string): Promise<CommitSignature | undefined> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		try {
 			const result = await this.git.exec(
@@ -1325,14 +1357,14 @@ export class CommitsGitSubProvider implements GitCommitsSubProvider {
 
 			return parseSignatureOutput(result.stdout);
 		} catch (ex) {
-			Logger.error(ex, scope);
+			scope?.error(ex);
 			return undefined;
 		}
 	}
 
-	@log()
+	@debug()
 	async isCommitSigned(repoPath: string, sha: string): Promise<boolean> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		try {
 			const result = await this.git.exec(
@@ -1347,7 +1379,7 @@ export class CommitsGitSubProvider implements GitCommitsSubProvider {
 			);
 			return /^gpgsig(-sha256)? /m.test(result.stdout);
 		} catch (ex) {
-			Logger.error(ex, scope);
+			scope?.error(ex);
 			return false;
 		}
 	}
@@ -1413,6 +1445,8 @@ export function createCommitFileset(
 				{ additions: f.additions ?? 0, deletions: f.deletions ?? 0, changes: 0 },
 				undefined,
 				f.range ? { startLine: f.range.startLine, endLine: f.range.endLine } : undefined,
+				f.mode,
+				f.oid ? { oid: f.oid, previousOid: f.previousOid } : undefined,
 			),
 	);
 
@@ -1446,10 +1480,10 @@ async function parseCommits(
 	const tipsOnly = searchFilters?.type === 'tip';
 
 	if (resultOrStream instanceof Promise) {
+		const scope = getScopedLogger();
 		const result = await resultOrStream;
 
-		const scope = getLogScope();
-		using sw = maybeStopWatch(scope, { log: false, logLevel: 'debug' });
+		using sw = maybeStopWatch(scope, { log: { onlyExit: true, level: 'debug' } });
 
 		if (stashes?.size) {
 			const allowFilteredFiles = searchFilters?.files ?? false;

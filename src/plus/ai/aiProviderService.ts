@@ -38,13 +38,13 @@ import { Directive, isDirective } from '../../quickpicks/items/directive.js';
 import { configuration } from '../../system/-webview/configuration.js';
 import { getContext } from '../../system/-webview/context.js';
 import type { Storage } from '../../system/-webview/storage.js';
-import { log } from '../../system/decorators/log.js';
+import { debug, trace } from '../../system/decorators/log.js';
 import { debounce } from '../../system/function/debounce.js';
 import { map } from '../../system/iterable.js';
 import type { Lazy } from '../../system/lazy.js';
 import { lazy } from '../../system/lazy.js';
 import { Logger } from '../../system/logger.js';
-import { getLogScope, setLogScopeExit } from '../../system/logger.scope.js';
+import { getScopedLogger } from '../../system/logger.scope.js';
 import type { Deferred } from '../../system/promise.js';
 import { getSettledValue, getSettledValues } from '../../system/promise.js';
 import { PromiseCache } from '../../system/promiseCache.js';
@@ -78,6 +78,7 @@ import type {
 } from './models/promptTemplates.js';
 import type { AIChatMessage, AIProvider, AIProviderResponse, AIProviderResult } from './models/provider.js';
 import { ensureAccess, getOrgAIConfig, isProviderEnabledByOrg } from './utils/-webview/ai.utils.js';
+import type { ResolvePromptOptions } from './utils/-webview/prompt.utils.js';
 import { getLocalPromptTemplate, resolvePrompt } from './utils/-webview/prompt.utils.js';
 
 export interface AIResponse<T = void> extends AIProviderResponse<T> {
@@ -615,7 +616,13 @@ export class AIProviderService implements AIService, Disposable {
 		return true;
 	}
 
-	@log({ args: false })
+	@debug({
+		args: (action, model, _, source) => ({
+			action: action,
+			model: model ? `${model.provider.id}/${model.id}` : undefined,
+			source: source,
+		}),
+	})
 	async sendRequest<T extends AIActionType>(
 		action: T,
 		model: AIModel | undefined,
@@ -628,20 +635,19 @@ export class AIProviderService implements AIService, Disposable {
 			progress?: ProgressOptions;
 		},
 	): Promise<AIProviderResult<void> | 'cancelled' | undefined> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
+		if (model != null) {
+			scope?.addExitInfo(`model: ${model.provider.id}/${model.id}`);
+		}
 
 		if (!(await this.ensureFeatureAccess(action, source))) {
-			setLogScopeExit(scope, undefined, 'cancelled: no feature access');
+			scope?.setFailed('cancelled: no feature access');
 			return 'cancelled';
 		}
 
 		model ??= await this.getModel(undefined, source);
 		if (model == null || options?.cancellation?.isCancellationRequested) {
-			setLogScopeExit(
-				scope,
-				model ? `model: ${model.provider.id}/${model.id}` : undefined,
-				model == null ? 'cancelled: no model set' : 'cancelled: user cancelled',
-			);
+			scope?.setFailed(model != null ? 'cancelled: user cancelled' : 'cancelled: no model set');
 			options?.generating?.cancel();
 			return 'cancelled';
 		}
@@ -661,10 +667,7 @@ export class AIProviderService implements AIService, Disposable {
 
 		const confirmed = await showConfirmAIProviderToS(this.container.storage);
 		if (!confirmed || cancellation.isCancellationRequested) {
-			setLogScopeExit(
-				scope,
-				`model: ${model.provider.id}/${model.id}`,
-
+			scope?.setFailed(
 				cancellation.isCancellationRequested ? 'cancelled: user cancelled' : 'cancelled: user declined ToS',
 			);
 			this.container.telemetry.sendEvent(
@@ -686,7 +689,7 @@ export class AIProviderService implements AIService, Disposable {
 			apiKey = await this._provider!.getApiKey(false);
 		} catch (ex) {
 			if (isCancellationError(ex)) {
-				setLogScopeExit(scope, `model: ${model.provider.id}/${model.id}`, 'cancelled: user cancelled');
+				scope?.setFailed('cancelled: user cancelled');
 				this.container.telemetry.sendEvent(
 					telementry.key,
 					{ ...telementry.data, failed: true, 'failed.reason': 'user-cancelled' },
@@ -701,7 +704,7 @@ export class AIProviderService implements AIService, Disposable {
 		}
 
 		if (cancellation.isCancellationRequested) {
-			setLogScopeExit(scope, `model: ${model.provider.id}/${model.id}`, 'cancelled: user cancelled');
+			scope?.setFailed('cancelled: user cancelled');
 			this.container.telemetry.sendEvent(
 				telementry.key,
 				{ ...telementry.data, failed: true, 'failed.reason': 'user-cancelled' },
@@ -713,7 +716,7 @@ export class AIProviderService implements AIService, Disposable {
 		}
 
 		if (apiKey == null) {
-			setLogScopeExit(scope, `model: ${model.provider.id}/${model.id}`, 'failed: Not authorized');
+			scope?.setFailed('failed: Not authorized');
 			this.container.telemetry.sendEvent(
 				telementry.key,
 				{ ...telementry.data, failed: true, 'failed.reason': 'error', 'failed.error': 'Not authorized' },
@@ -757,7 +760,7 @@ export class AIProviderService implements AIService, Disposable {
 				telementry.data['usage.limits.limit'] = result?.usage?.limits?.limit;
 				telementry.data['usage.limits.resetsOn'] = result?.usage?.limits?.resetsOn?.toISOString();
 
-				setLogScopeExit(scope, `model: ${model.provider.id}/${model.id}, id: ${result?.id}`);
+				scope?.addExitInfo(`id: ${result?.id}`);
 				this.container.telemetry.sendEvent(
 					telementry.key,
 					{ ...telementry.data, duration: Date.now() - start, id: result?.id },
@@ -771,7 +774,7 @@ export class AIProviderService implements AIService, Disposable {
 				return result;
 			} catch (ex) {
 				if (ex instanceof CancellationError) {
-					setLogScopeExit(scope, `model: ${model.provider.id}/${model.id}`, 'cancelled: user cancelled');
+					scope?.setFailed('cancelled: user cancelled');
 					this.container.telemetry.sendEvent(
 						telementry.key,
 						{
@@ -786,11 +789,7 @@ export class AIProviderService implements AIService, Disposable {
 					return 'cancelled';
 				}
 				if (ex instanceof AIError) {
-					setLogScopeExit(
-						scope,
-						`model: ${model.provider.id}/${model.id}`,
-						`failed: ${String(ex)} (${String(ex.original)})`,
-					);
+					scope?.setFailed(`failed: ${String(ex)} (${String(ex.original)})`);
 
 					this.container.telemetry.sendEvent(
 						telementry.key,
@@ -934,11 +933,7 @@ export class AIProviderService implements AIService, Disposable {
 					return undefined;
 				}
 
-				setLogScopeExit(
-					scope,
-					`model: ${model.provider.id}/${model.id}`,
-					`failed: ${String(ex)}${ex.original ? ` (${String(ex.original)})` : ''}`,
-				);
+				scope?.setFailed(`failed: ${String(ex)}${ex.original ? ` (${String(ex.original)})` : ''}`);
 				this.container.telemetry.sendEvent(
 					telementry.key,
 					{
@@ -968,7 +963,13 @@ export class AIProviderService implements AIService, Disposable {
 	 *
 	 * @template TResult The type of the final result after validation
 	 */
-	@log({ args: false })
+	@debug({
+		args: (action, model, _, source) => ({
+			action: action,
+			model: model ? `${model.provider.id}/${model.id}` : undefined,
+			source: source,
+		}),
+	})
 	async sendRequestConversation<TResult>(
 		action: AIActionType,
 		model: AIModel | undefined,
@@ -1079,6 +1080,7 @@ export class AIProviderService implements AIService, Disposable {
 		retries: number | undefined,
 		reporting: TelemetryEvents['ai/generate' | 'ai/explain'] | undefined,
 		truncationHandler?: TruncationHandler<T>,
+		options?: ResolvePromptOptions,
 	): Promise<{ prompt: string; truncated: boolean }>;
 
 	async getPrompt<T extends PromptTemplateType>(
@@ -1089,6 +1091,7 @@ export class AIProviderService implements AIService, Disposable {
 		retries?: undefined,
 		reporting?: undefined,
 		truncationHandler?: undefined,
+		options?: undefined,
 	): Promise<{ prompt: string; truncated: boolean }>;
 
 	async getPrompt<T extends PromptTemplateType>(
@@ -1099,6 +1102,7 @@ export class AIProviderService implements AIService, Disposable {
 		retries?: number | undefined,
 		reporting?: TelemetryEvents['ai/generate' | 'ai/explain'] | undefined,
 		truncationHandler?: TruncationHandler<T>,
+		options?: ResolvePromptOptions,
 	): Promise<{ prompt: string; truncated: boolean }> {
 		const promptTemplate = await this.getPromptTemplate(templateType, model);
 		if (promptTemplate == null) {
@@ -1115,14 +1119,29 @@ export class AIProviderService implements AIService, Disposable {
 			return resolvePrompt(undefined, promptTemplate, context, undefined, undefined, undefined, undefined);
 		}
 
-		return resolvePrompt(model, promptTemplate, context, maxInputTokens, retries, reporting, truncationHandler);
+		return resolvePrompt(
+			model,
+			promptTemplate,
+			context,
+			maxInputTokens,
+			retries,
+			reporting,
+			truncationHandler,
+			options,
+		);
 	}
 
+	@trace({
+		args: (templateType, model) => ({
+			templateType: templateType,
+			model: model ? `${model.provider.id}/${model.id}` : undefined,
+		}),
+	})
 	private async getPromptTemplate<T extends PromptTemplateType>(
 		templateType: T,
 		model: AIModel | undefined,
 	): Promise<PromptTemplate | undefined> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		const template = getLocalPromptTemplate(templateType, model);
 		const templateId = template?.id ?? templateType;
@@ -1171,7 +1190,7 @@ export class AIProviderService implements AIService, Disposable {
 				cancellable.invalidate();
 				if (!(ex instanceof AuthenticationRequiredError)) {
 					debugger;
-					Logger.error(ex, scope, String(ex));
+					scope?.error(ex, String(ex));
 				}
 				return template;
 			}

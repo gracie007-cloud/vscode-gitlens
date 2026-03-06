@@ -10,9 +10,8 @@ import type { GitUser } from '../../../../git/models/user.js';
 import { configuration } from '../../../../system/-webview/configuration.js';
 import { getBestPath } from '../../../../system/-webview/path.js';
 import { gate } from '../../../../system/decorators/gate.js';
-import { debug, log } from '../../../../system/decorators/log.js';
-import { Logger } from '../../../../system/logger.js';
-import { getLogScope } from '../../../../system/logger.scope.js';
+import { debug, trace } from '../../../../system/decorators/log.js';
+import { getScopedLogger } from '../../../../system/logger.scope.js';
 import type { Git } from '../git.js';
 import type { LocalGitProviderInternal } from '../localGitProvider.js';
 
@@ -52,7 +51,7 @@ export class ConfigGitSubProvider implements GitConfigSubProvider {
 		private readonly provider: LocalGitProviderInternal,
 	) {}
 
-	@debug()
+	@trace()
 	getConfig(
 		repoPath: string | undefined,
 		key: GitConfigKeys,
@@ -87,7 +86,7 @@ export class ConfigGitSubProvider implements GitConfigSubProvider {
 		return result.stdout.trim() || undefined;
 	}
 
-	@debug()
+	@trace()
 	getConfigRegex(
 		repoPath: string | undefined,
 		pattern: string,
@@ -119,7 +118,7 @@ export class ConfigGitSubProvider implements GitConfigSubProvider {
 		return parseConfigRegexOutput(result.stdout.trim());
 	}
 
-	@log()
+	@debug()
 	async setConfig(
 		repoPath: string | undefined,
 		key: GitConfigKeys,
@@ -161,11 +160,11 @@ export class ConfigGitSubProvider implements GitConfigSubProvider {
 	}
 
 	@gate()
-	@log()
+	@debug()
 	async getCurrentUser(repoPath: string): Promise<GitUser | undefined> {
 		if (!repoPath) return undefined;
 
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		const cached = this.cache.currentUser.get(repoPath);
 		if (cached != null) return cached;
@@ -211,7 +210,7 @@ export class ConfigGitSubProvider implements GitConfigSubProvider {
 			this.cache.currentUser.set(repoPath, user);
 			return user;
 		} catch (ex) {
-			Logger.error(ex, scope);
+			scope?.error(ex);
 			debugger;
 
 			// Mark it so we won't bother trying again
@@ -221,15 +220,16 @@ export class ConfigGitSubProvider implements GitConfigSubProvider {
 	}
 
 	@gate()
-	@debug<NonNullable<ConfigGitSubProvider>['getDefaultWorktreePath']>({ exit: r => `returned ${r}` })
+	@trace({ exit: r => `returned ${r}` })
 	async getDefaultWorktreePath(repoPath: string): Promise<string | undefined> {
 		const gitDir = await this.getGitDir(repoPath);
 		return getBestPath(Uri.joinPath(gitDir.commonUri ?? gitDir.uri, '..'));
 	}
 
 	@gate()
-	@debug<NonNullable<ConfigGitSubProvider>['getGitDir']>({
-		exit: r => `returned ${r.uri.toString(true)}, commonUri=${r.commonUri?.toString(true)}`,
+	@trace({
+		exit: r =>
+			`returned ${r.uri.toString(true)}, commonUri=${r.commonUri?.toString(true)}, parentUri=${r.parentUri?.toString(true)}`,
 	})
 	async getGitDir(repoPath: string): Promise<GitDir> {
 		const cached = this.cache.gitDir.get(repoPath);
@@ -242,6 +242,7 @@ export class ConfigGitSubProvider implements GitConfigSubProvider {
 			gitDir = {
 				uri: Uri.file(repoInfo.gitDir),
 				commonUri: repoInfo.commonGitDir ? Uri.file(repoInfo.commonGitDir) : undefined,
+				parentUri: repoInfo.superprojectPath ? Uri.file(repoInfo.superprojectPath) : undefined,
 			};
 		} else {
 			gitDir = {
@@ -298,13 +299,13 @@ export class ConfigGitSubProvider implements GitConfigSubProvider {
 		return this.getConfigRegexCore(repoPath, pattern, { runGitLocally: true, file: gkConfigPath });
 	}
 
-	@log()
+	@debug()
 	async setGkConfig(
 		repoPath: string,
 		key: GkConfigKeys | DeprecatedGkConfigKeys,
 		value: string | undefined,
 	): Promise<void> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		const gkConfigUri = await this.getGkConfigUri(repoPath);
 
@@ -313,7 +314,7 @@ export class ConfigGitSubProvider implements GitConfigSubProvider {
 		try {
 			await workspace.fs.createDirectory(gkConfigFolderUri);
 		} catch (ex) {
-			Logger.error(ex, scope, `Failed to create '${gkConfigFolderUri.toString(true)}' directory`);
+			scope?.error(ex, `Failed to create '${gkConfigFolderUri.toString(true)}' directory`);
 		}
 
 		await this.setConfigCore(repoPath, key, value, { file: gkConfigUri.fsPath });
@@ -322,7 +323,7 @@ export class ConfigGitSubProvider implements GitConfigSubProvider {
 		this.cache.deleteGkConfig(repoPath, key);
 	}
 
-	@log()
+	@debug()
 	async getSigningConfig(repoPath: string): Promise<SigningConfig> {
 		// Fetch all signing-related config in one call
 		const configMap = await this.getConfigRegex(
@@ -359,7 +360,7 @@ export class ConfigGitSubProvider implements GitConfigSubProvider {
 		};
 	}
 
-	@log()
+	@debug()
 	async validateSigningSetup(repoPath: string): Promise<ValidationResult> {
 		const config = await this.getSigningConfig(repoPath);
 
@@ -372,13 +373,13 @@ export class ConfigGitSubProvider implements GitConfigSubProvider {
 		return { valid: true };
 	}
 
-	@log()
+	@debug()
 	async setSigningConfig(
 		repoPath: string,
 		config: Partial<SigningConfig>,
 		options?: { global?: boolean },
 	): Promise<void> {
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		try {
 			if (config.enabled != null) {
@@ -400,7 +401,7 @@ export class ConfigGitSubProvider implements GitConfigSubProvider {
 				await this.setConfig(repoPath, 'gpg.ssh.allowedSignersFile', config.allowedSignersFile, options);
 			}
 		} catch (ex) {
-			Logger.error(ex, scope);
+			scope?.error(ex);
 			throw ex;
 		}
 	}
@@ -433,11 +434,11 @@ export class ConfigGitSubProvider implements GitConfigSubProvider {
 	 * Removes migrated keys from regular git config to stop cluttering it.
 	 */
 	@gate()
-	@log()
+	@debug()
 	private async migrateGkConfigFromGitConfig(repoPath: string): Promise<void> {
 		if (this._migratedRepos.has(repoPath)) return;
 
-		const scope = getLogScope();
+		const scope = getScopedLogger();
 
 		const gkConfigUri = await this.getGkConfigUri(repoPath);
 		const gkConfigFolderUri = Uri.joinPath(gkConfigUri, '..');
@@ -456,10 +457,10 @@ export class ConfigGitSubProvider implements GitConfigSubProvider {
 			try {
 				await workspace.fs.writeFile(gkConfigUri, new Uint8Array());
 			} catch (ex) {
-				Logger.error(ex, scope, `Failed to create '${gkConfigUri.toString(true)}' file`);
+				scope?.error(ex, `Failed to create '${gkConfigUri.toString(true)}' file`);
 			}
 		} catch (ex) {
-			Logger.error(ex, scope, `Failed to create '${gkConfigFolderUri.toString(true)}' directory`);
+			scope?.error(ex, `Failed to create '${gkConfigFolderUri.toString(true)}' directory`);
 			return;
 		}
 
@@ -468,7 +469,7 @@ export class ConfigGitSubProvider implements GitConfigSubProvider {
 		try {
 			migrateConfig = await this.getConfigRegexCore(repoPath, '^branch\\..*\\.gk-', { runGitLocally: true });
 		} catch (ex) {
-			Logger.error(ex, scope, 'Failed to read legacy GK config entries');
+			scope?.error(ex, 'Failed to read legacy GK config entries');
 			this._migratedRepos.add(repoPath);
 			return;
 		}
@@ -478,7 +479,7 @@ export class ConfigGitSubProvider implements GitConfigSubProvider {
 			return;
 		}
 
-		Logger.log(scope, `Migrating ${migrateConfig.size} GK config entries from git config to .git/gk/config`);
+		scope?.info(`Migrating ${migrateConfig.size} GK config entries from git config to .git/gk/config`);
 
 		// Copy legacy entries to .git/gk/config
 		const gkConfigPath = gkConfigUri.fsPath;
@@ -486,7 +487,7 @@ export class ConfigGitSubProvider implements GitConfigSubProvider {
 			try {
 				await this.setConfigCore(repoPath, key as GkConfigKeys, value, { file: gkConfigPath });
 			} catch (ex) {
-				Logger.error(ex, scope, `Failed to migrate key '${key}' to GK config`);
+				scope?.error(ex, `Failed to migrate key '${key}' to GK config`);
 				// If we failed to migrate, delete it from the list so we won't try to remove it from git config later
 				migrateConfig.delete(key);
 			}
@@ -503,7 +504,7 @@ export class ConfigGitSubProvider implements GitConfigSubProvider {
 					key,
 				);
 			} catch (ex) {
-				Logger.error(ex, scope, `Failed to remove migrated key '${key}' from git config`);
+				scope?.error(ex, `Failed to remove migrated key '${key}' from git config`);
 			}
 		}
 

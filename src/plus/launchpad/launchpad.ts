@@ -478,7 +478,7 @@ export class LaunchpadCommand extends QuickCommand<State> {
 						if (state.initialGroup == null) {
 							void this.container.storage.store(
 								'launchpad:groups:collapsed',
-								Array.from(context.collapsed.keys()).filter(g => context.collapsed.get(g)),
+								[...context.collapsed.keys()].filter(g => context.collapsed.get(g)),
 							);
 						}
 
@@ -822,7 +822,7 @@ export class LaunchpadCommand extends QuickCommand<State> {
 
 					case OpenOnWebQuickInputButton:
 						this.sendTitleActionTelemetry('open-on-gkdev', context);
-						void openUrl(this.container.launchpad.generateWebUrl());
+						void openUrl(await this.container.launchpad.generateWebUrl());
 						break;
 
 					case RefreshQuickInputButton:
@@ -1126,7 +1126,7 @@ export class LaunchpadCommand extends QuickCommand<State> {
 								context,
 							);
 							if (isLaunchpadTargetActionQuickPickItem(item)) {
-								this.container.launchpad.openCodeSuggestionInBrowser(item.item.target);
+								await this.container.launchpad.openCodeSuggestionInBrowser(item.item.target);
 							}
 							break;
 						case PinQuickInputButton:

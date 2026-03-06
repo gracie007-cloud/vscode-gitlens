@@ -67,6 +67,7 @@ interface StashMessagePromptTemplateContext {
 interface GenerateCommitsPromptTemplateContext {
 	hunks: string;
 	existingCommits: string;
+	commitMessages: string;
 	hunkMap: string;
 	context?: string;
 	instructions?: string;
@@ -75,13 +76,11 @@ interface GenerateCommitsPromptTemplateContext {
 interface ReviewPullRequestPromptTemplateContext {
 	prData: string;
 	instructions?: string;
-	mcpTools?: string;
 }
 
 interface StartWorkIssuePromptTemplateContext {
 	issue: string;
 	instructions?: string;
-	mcpTools?: string;
 }
 
 export type PromptTemplateType =

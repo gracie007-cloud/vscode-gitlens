@@ -62,6 +62,8 @@ export interface GitDir {
 	readonly uri: Uri;
 	/** The common git directory for worktrees */
 	readonly commonUri?: Uri;
+	/** The parent repository for submodules */
+	readonly parentUri?: Uri;
 }
 
 export type GitProviderId = 'git' | 'github' | 'vsls';
@@ -575,7 +577,7 @@ export interface GitDiffSubProvider {
 		repoPath: string,
 		ref1OrRange: string | GitRevisionRange,
 		ref2?: string,
-		options?: { filters?: GitDiffFilter[]; path?: string; similarityThreshold?: number },
+		options?: { filters?: GitDiffFilter[]; path?: string; renameLimit?: number; similarityThreshold?: number },
 		cancellation?: CancellationToken,
 	): Promise<GitFile[] | undefined>;
 	getDiffTool?(repoPath?: string): Promise<string | undefined>;
@@ -784,6 +786,10 @@ export interface ResolvedRevision {
 
 export interface GitRevisionSubProvider {
 	getRevisionContent(repoPath: string, rev: string, path: string): Promise<Uint8Array | undefined>;
+	/** Gets the current HEAD SHA of a submodule in the working tree */
+	getSubmoduleHead?(repoPath: string, submodulePath: string): Promise<string | undefined>;
+	/** Gets tracked file paths from the index (reflects working tree state, even during rebase) */
+	getTrackedFiles(repoPath: string): Promise<string[]>;
 	getTreeEntryForRevision(repoPath: string, rev: string, path: string): Promise<GitTreeEntry | undefined>;
 	getTreeForRevision(repoPath: string, rev: string): Promise<GitTreeEntry[]>;
 	resolveRevision(repoPath: string, ref: string, pathOrUri?: string | Uri): Promise<ResolvedRevision>;
@@ -1052,9 +1058,9 @@ export interface GitProvider extends GitRepositoryProvider, Disposable {
 	canHandlePathOrUri(scheme: string, pathOrUri: string | Uri): string | undefined;
 	findRepositoryUri(uri: Uri, isDirectory?: boolean): Promise<Uri | undefined>;
 	getAbsoluteUri(pathOrUri: string | Uri, base: string | Uri): Uri;
-	getBestRevisionUri(repoPath: string, path: string, rev: string | undefined): Promise<Uri | undefined>;
+	getBestRevisionUri(repoPath: string, pathOrUri: string | Uri, rev: string | undefined): Promise<Uri | undefined>;
 	getRelativePath(pathOrUri: string | Uri, base: string | Uri): string;
-	getRevisionUri(repoPath: string, rev: string, path: string): Uri;
+	getRevisionUri(repoPath: string, rev: string, path: string, options?: RevisionUriOptions): Uri;
 	// getRootUri(pathOrUri: string | Uri): Uri;
 	getWorkingUri(repoPath: string, uri: Uri): Promise<Uri | undefined>;
 	isFolderUri(repoPath: string, uri: Uri): Promise<boolean>;
@@ -1137,4 +1143,9 @@ export interface RevisionUriData {
 	ref?: string;
 	repoPath: string;
 	uncPath?: string;
+	submoduleSha?: string;
+}
+
+export interface RevisionUriOptions {
+	submoduleSha?: string;
 }
